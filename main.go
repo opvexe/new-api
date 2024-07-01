@@ -138,6 +138,8 @@ func main() {
 		port = strconv.Itoa(*common.Port)
 	}
 	err = server.Run(":" + port)
+
+	common.SysLog("HTTP server started on port " + port)
 	if err != nil {
 		common.FatalLog("failed to start HTTP server: " + err.Error())
 	}
