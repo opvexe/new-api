@@ -10,6 +10,9 @@ permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE_VERSION_PREFIX: v1.0.0-rc
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,6 +20,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Prepare image version
+        id: version
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_VERSION="${IMAGE_VERSION_PREFIX}.${SHORT_SHA}"
+          echo "tag=${IMAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "${IMAGE_VERSION}" > VERSION
+          echo "Building ${IMAGE_VERSION}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -42,8 +54,8 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/new-api:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/new-api:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/new-api:${{ steps.version.outputs.tag }}
             ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
