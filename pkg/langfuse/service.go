@@ -1,0 +1,328 @@
+package langfuse
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/google/uuid"
+)
+
+const (
+	defaultQueueSize = 10
+	httpTimeout      = 90 * time.Second
+	shutdownTimeout  = 3 * time.Second
+	dropReportPeriod = 30 * time.Second
+)
+
+type Usage struct {
+	Input  int64 `json:"input,omitempty"`
+	Output int64 `json:"output,omitempty"`
+	Total  int64 `json:"total,omitempty"`
+}
+
+type GenerationRequest struct {
+	TraceID         string
+	Name            string
+	Model           string
+	StartTime       time.Time
+	EndTime         time.Time
+	Input           any
+	Output          any
+	Usage           *Usage
+	UserID          string
+	UserName        string
+	ApiKeyID        string
+	ApiKeyName      string
+	Route           string
+	SessionID       string
+	ModelParameters map[string]any
+	Metadata        map[string]any
+}
+
+type event struct {
+	ID        string          `json:"id"`
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Body      json.RawMessage `json:"body"`
+}
+
+type traceBody struct {
+	ID          string         `json:"id"`
+	Timestamp   time.Time      `json:"timestamp"`
+	Name        string         `json:"name,omitempty"`
+	UserID      string         `json:"userId,omitempty"`
+	SessionID   string         `json:"sessionId,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Tags        []string       `json:"tags,omitempty"`
+	Environment string         `json:"environment,omitempty"`
+	Input       any            `json:"input,omitempty"`
+	Output      any            `json:"output,omitempty"`
+}
+
+type generationBody struct {
+	ID              string         `json:"id"`
+	TraceID         string         `json:"traceId"`
+	Name            string         `json:"name,omitempty"`
+	StartTime       time.Time      `json:"startTime"`
+	EndTime         time.Time      `json:"endTime,omitempty"`
+	Model           string         `json:"model,omitempty"`
+	Environment     string         `json:"environment,omitempty"`
+	ModelParameters map[string]any `json:"modelParameters,omitempty"`
+	Input           any            `json:"input,omitempty"`
+	Output          any            `json:"output,omitempty"`
+	Usage           *Usage         `json:"usage,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	Level           string         `json:"level,omitempty"`
+}
+
+type batchRequest struct {
+	Batch    []event `json:"batch"`
+	Metadata struct {
+		SDKName    string `json:"sdk_name,omitempty"`
+		SDKVersion string `json:"sdk_version,omitempty"`
+	} `json:"metadata,omitempty"`
+}
+
+type Client struct {
+	endpoint    string
+	authHeader  string
+	environment string
+	httpClient  *http.Client
+
+	eventCh chan event
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	force   context.Context
+	cancel  context.CancelFunc
+	start   sync.Once
+	stop    sync.Once
+	dropped atomic.Uint64
+}
+
+func NewClient(config Config) (*Client, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	if !config.Enabled {
+		return nil, nil
+	}
+	queueSize := config.MaxQueueSize
+	if queueSize <= 0 {
+		queueSize = defaultQueueSize
+	}
+	force, cancel := context.WithCancel(context.Background())
+	return &Client{
+		endpoint:    strings.TrimRight(config.Endpoint, "/"),
+		authHeader:  "Basic " + base64.StdEncoding.EncodeToString([]byte(config.PublicKey+":"+config.SecretKey)),
+		environment: config.Environment,
+		httpClient:  &http.Client{Timeout: httpTimeout},
+		eventCh:     make(chan event, queueSize),
+		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
+		force:       force,
+		cancel:      cancel,
+	}, nil
+}
+
+func NewClientFromEnv() (*Client, error) {
+	config := Config{
+		Enabled:      common.GetEnvOrDefaultBool("LANGFUSE_ENABLED", false),
+		Endpoint:     common.GetEnvOrDefaultString("LANGFUSE_ENDPOINT", "https://cloud.langfuse.com"),
+		PublicKey:    common.GetEnvOrDefaultString("LANGFUSE_PUBLIC_KEY", ""),
+		SecretKey:    common.GetEnvOrDefaultString("LANGFUSE_SECRET_KEY", ""),
+		MaxQueueSize: common.GetEnvOrDefault("LANGFUSE_MAX_QUEUE_SIZE", defaultQueueSize),
+		Environment:  common.GetEnvOrDefaultString("LANGFUSE_ENVIRONMENT", "production"),
+	}
+	client, err := NewClient(config)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		common.SysLog("langfuse tracing is disabled")
+		return nil, nil
+	}
+	common.SysLog(fmt.Sprintf("langfuse tracing enabled: endpoint=%s environment=%s", client.endpoint, client.environment))
+	return client, nil
+}
+
+func (c *Client) Start() {
+	if c == nil {
+		return
+	}
+	c.start.Do(func() {
+		go c.run()
+	})
+}
+
+func (c *Client) Stop() {
+	if c == nil {
+		return
+	}
+	c.Start()
+	c.stop.Do(func() {
+		close(c.stopCh)
+		select {
+		case <-c.doneCh:
+		case <-time.After(shutdownTimeout):
+			c.cancel()
+			<-c.doneCh
+		}
+	})
+}
+
+func (c *Client) TraceGeneration(request GenerationRequest) {
+	if c == nil {
+		return
+	}
+	traceID := request.TraceID
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	metadata := make(map[string]any, len(request.Metadata)+5)
+	for key, value := range request.Metadata {
+		metadata[key] = value
+	}
+	metadata["user_id"] = request.UserID
+	metadata["route"] = request.Route
+	metadata["request_id"] = traceID
+	metadata["apikey_name"] = request.ApiKeyName
+	metadata["api_key_id"] = request.ApiKeyID
+
+	trace := traceBody{
+		ID:          traceID,
+		Timestamp:   request.StartTime,
+		Name:        request.Name,
+		UserID:      request.UserID,
+		SessionID:   request.SessionID,
+		Metadata:    metadata,
+		Environment: c.environment,
+		Input:       request.Input,
+		Output:      request.Output,
+	}
+	if request.UserName != "" {
+		trace.Tags = []string{"user:" + request.UserName}
+	}
+	c.enqueue("trace-create", request.StartTime, trace)
+	c.enqueue("generation-create", request.StartTime, generationBody{
+		ID:              uuid.NewString(),
+		TraceID:         traceID,
+		Name:            request.Name,
+		StartTime:       request.StartTime,
+		EndTime:         request.EndTime,
+		Model:           request.Model,
+		Environment:     c.environment,
+		ModelParameters: request.ModelParameters,
+		Input:           request.Input,
+		Output:          request.Output,
+		Usage:           request.Usage,
+		Metadata:        metadata,
+		Level:           "DEFAULT",
+	})
+	latency := request.EndTime.Sub(request.StartTime).Milliseconds()
+	common.SysLog(fmt.Sprintf("langfuse trace created: trace_id=%s name=%s model=%s user_id=%s session_id=%s route=%s latency_ms=%d", traceID, request.Name, request.Model, request.UserID, request.SessionID, request.Route, latency))
+}
+
+func (c *Client) enqueue(eventType string, timestamp time.Time, body any) {
+	bodyData, err := common.Marshal(body)
+	if err != nil {
+		common.SysError("failed to marshal langfuse event: " + err.Error())
+		return
+	}
+	item := event{
+		ID:        uuid.NewString(),
+		Type:      eventType,
+		Timestamp: timestamp.UTC().Format(time.RFC3339Nano),
+		Body:      bodyData,
+	}
+	select {
+	case <-c.stopCh:
+		c.dropped.Add(1)
+		return
+	default:
+	}
+	select {
+	case <-c.stopCh:
+		c.dropped.Add(1)
+	case c.eventCh <- item:
+	}
+}
+
+func (c *Client) run() {
+	defer close(c.doneCh)
+	dropTicker := time.NewTicker(dropReportPeriod)
+	defer dropTicker.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			c.drain()
+			return
+		case item := <-c.eventCh:
+			c.send(c.force, []event{item})
+		case <-dropTicker.C:
+			if dropped := c.dropped.Swap(0); dropped > 0 {
+				common.SysError(fmt.Sprintf("langfuse dropped %d events because the queue was full or ingestion failed", dropped))
+			}
+		}
+	}
+}
+func (c *Client) drain() {
+	ctx, cancel := context.WithTimeout(c.force, shutdownTimeout)
+	defer cancel()
+	for {
+		select {
+		case item := <-c.eventCh:
+			c.send(ctx, []event{item})
+		default:
+			return
+		}
+	}
+}
+
+func (c *Client) send(parent context.Context, events []event) {
+	if len(events) == 0 {
+		return
+	}
+	requestBody := batchRequest{Batch: events}
+	requestBody.Metadata.SDKName = "new-api-go"
+	requestBody.Metadata.SDKVersion = "1.0.0"
+	body, err := common.Marshal(requestBody)
+	if err != nil {
+		c.dropped.Add(uint64(len(events)))
+		common.SysError("failed to marshal langfuse batch: " + err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, httpTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/api/public/ingestion", bytes.NewReader(body))
+	if err != nil {
+		c.dropped.Add(uint64(len(events)))
+		common.SysError("failed to create langfuse request: " + err.Error())
+		return
+	}
+	request.Header.Set("Authorization", c.authHeader)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		c.dropped.Add(uint64(len(events)))
+		common.SysError("failed to send langfuse batch: " + err.Error())
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusMultipleChoices {
+		common.SysLog(fmt.Sprintf("langfuse ingestion succeeded: status=%d events=%d", response.StatusCode, len(events)))
+		return
+	}
+	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
+	c.dropped.Add(uint64(len(events)))
+	common.SysError(fmt.Sprintf("langfuse ingestion failed: status=%d body=%s", response.StatusCode, responseBody))
+}

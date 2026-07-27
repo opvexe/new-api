@@ -8,14 +8,15 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/pkg/langfuse"
 
 	"github.com/gin-gonic/gin"
 )
 
-func SetRouter(router *gin.Engine, assets WebAssets) {
+func SetRouter(router *gin.Engine, assets WebAssets, langfuseClient *langfuse.Client) {
 	SetApiRouter(router)
 	SetDashboardRouter(router)
-	SetRelayRouter(router)
+	SetRelayRouter(router, langfuseClient)
 	SetVideoRouter(router)
 	frontendBaseUrl := os.Getenv("FRONTEND_BASE_URL")
 	if common.IsMasterNode && frontendBaseUrl != "" {

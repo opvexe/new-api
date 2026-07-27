@@ -4,13 +4,14 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/pkg/langfuse"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
 
-func SetRelayRouter(router *gin.Engine) {
+func SetRelayRouter(router *gin.Engine, langfuseClient *langfuse.Client) {
 	router.Use(middleware.CORS())
 	router.Use(middleware.DecompressRequestMiddleware())
 	router.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
@@ -85,7 +86,7 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter.Use(middleware.Distribute())
 
 		// claude related routes
-		httpRouter.POST("/messages", func(c *gin.Context) {
+		httpRouter.POST("/messages", langfuse.Middleware(langfuseClient), func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatClaude)
 		})
 

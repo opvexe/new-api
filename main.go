@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	"github.com/QuantumNous/new-api/pkg/langfuse"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/router"
@@ -186,12 +187,21 @@ func main() {
 	middleware.SetUpLogger(server)
 	InjectUmamiAnalytics()
 	InjectGoogleAnalytics()
+	langfuseClient, err := langfuse.NewClientFromEnv()
+	if err != nil {
+		common.FatalLog("failed to initialize langfuse: " + err.Error())
+		return
+	}
+	if langfuseClient != nil {
+		langfuseClient.Start()
+		defer langfuseClient.Stop()
+	}
 
 	// 设置路由
 	router.SetRouter(server, router.WebAssets{
 		BuildFS:   buildFS,
 		IndexPage: indexPage,
-	})
+	}, langfuseClient)
 	var port = os.Getenv("PORT")
 	if port == "" {
 		port = strconv.Itoa(*common.Port)
