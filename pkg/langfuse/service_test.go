@@ -20,8 +20,8 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 	return f(request)
 }
 
-func TestClientSendsLangfuseIngestionBatch(t *testing.T) {
-	received := make(chan batchRequest, 2)
+func TestClientSendsLangfuseTraceCreate(t *testing.T) {
+	received := make(chan batchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		assert.Equal(t, "/api/public/ingestion", request.URL.Path)
 		assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("pk:sk")), request.Header.Get("Authorization"))
@@ -54,9 +54,11 @@ func TestClientSendsLangfuseIngestionBatch(t *testing.T) {
 		Output:     map[string]any{"type": "message"},
 		Usage:      &Usage{Input: 10, Output: 5, Total: 15},
 		UserID:     "user-1",
+		UserName:   "alice",
 		ApiKeyID:   "key-1",
 		ApiKeyName: "default",
 		Route:      "POST /v1/messages",
+		SessionID:  "session-1",
 		Metadata: map[string]any{
 			"thinking_effort": "max",
 		},
@@ -68,37 +70,40 @@ func TestClientSendsLangfuseIngestionBatch(t *testing.T) {
 	select {
 	case traceBatch := <-received:
 		require.Len(t, traceBatch.Batch, 1)
-		assert.Equal(t, "trace-create", traceBatch.Batch[0].Type)
+		assert.Equal(t, EventTypeTraceCreate, traceBatch.Batch[0].Type)
 		var trace traceBody
 		require.NoError(t, common.Unmarshal(traceBatch.Batch[0].Body, &trace))
+		assert.Equal(t, "trace-1", trace.ID)
+		assert.Equal(t, "user-1", trace.UserID)
+		assert.Equal(t, "session-1", trace.SessionID)
+		assert.Equal(t, []string{"user:alice"}, trace.Tags)
+		assert.Equal(t, map[string]any{"model": "claude-sonnet-4"}, trace.Input)
+		assert.Equal(t, map[string]any{"type": "message"}, trace.Output)
+		assert.Equal(t, "claude-sonnet-4", trace.Metadata["model"])
+		assert.Equal(t, float64(1000), trace.Metadata["latency_ms"])
 		assert.Equal(t, map[string]any{
-			"user_id":         "user-1",
-			"thinking_effort": "max",
-			"route":           "POST /v1/messages",
-			"request_id":      "trace-1",
-			"apikey_name":     "default",
-			"api_key_id":      "key-1",
-		}, trace.Metadata)
+			"input":  float64(10),
+			"output": float64(5),
+			"total":  float64(15),
+		}, trace.Metadata["usage"])
+		assert.Equal(t, map[string]any{"thinking_effort": "max"}, trace.Metadata["model_parameters"])
+		assert.Equal(t, "max", trace.Metadata["thinking_effort"])
+		assert.Equal(t, map[string]any{
+			"user_id":     "user-1",
+			"route":       "POST /v1/messages",
+			"request_id":  "trace-1",
+			"apikey_name": "default",
+			"api_key_id":  "key-1",
+		}, map[string]any{
+			"user_id":     trace.Metadata["user_id"],
+			"route":       trace.Metadata["route"],
+			"request_id":  trace.Metadata["request_id"],
+			"apikey_name": trace.Metadata["apikey_name"],
+			"api_key_id":  trace.Metadata["api_key_id"],
+		})
+		assert.NotEmpty(t, trace.Metadata["end_time"])
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for langfuse trace ingestion request")
-	}
-	select {
-	case generationBatch := <-received:
-		require.Len(t, generationBatch.Batch, 1)
-		assert.Equal(t, "generation-create", generationBatch.Batch[0].Type)
-		var generation generationBody
-		require.NoError(t, common.Unmarshal(generationBatch.Batch[0].Body, &generation))
-		assert.Equal(t, map[string]any{"thinking_effort": "max"}, generation.ModelParameters)
-		assert.Equal(t, map[string]any{
-			"user_id":         "user-1",
-			"thinking_effort": "max",
-			"route":           "POST /v1/messages",
-			"request_id":      "trace-1",
-			"apikey_name":     "default",
-			"api_key_id":      "key-1",
-		}, generation.Metadata)
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for langfuse generation ingestion request")
 	}
 }
 

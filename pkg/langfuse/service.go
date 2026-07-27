@@ -18,6 +18,8 @@ import (
 )
 
 const (
+	EventTypeTraceCreate = "trace-create"
+
 	defaultQueueSize = 10
 	httpTimeout      = 90 * time.Second
 	shutdownTimeout  = 3 * time.Second
@@ -67,22 +69,6 @@ type traceBody struct {
 	Environment string         `json:"environment,omitempty"`
 	Input       any            `json:"input,omitempty"`
 	Output      any            `json:"output,omitempty"`
-}
-
-type generationBody struct {
-	ID              string         `json:"id"`
-	TraceID         string         `json:"traceId"`
-	Name            string         `json:"name,omitempty"`
-	StartTime       time.Time      `json:"startTime"`
-	EndTime         time.Time      `json:"endTime,omitempty"`
-	Model           string         `json:"model,omitempty"`
-	Environment     string         `json:"environment,omitempty"`
-	ModelParameters map[string]any `json:"modelParameters,omitempty"`
-	Input           any            `json:"input,omitempty"`
-	Output          any            `json:"output,omitempty"`
-	Usage           *Usage         `json:"usage,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
-	Level           string         `json:"level,omitempty"`
 }
 
 type batchRequest struct {
@@ -188,16 +174,21 @@ func (c *Client) TraceGeneration(request GenerationRequest) {
 	if traceID == "" {
 		traceID = uuid.NewString()
 	}
-	metadata := make(map[string]any, len(request.Metadata)+5)
+	latency := request.EndTime.Sub(request.StartTime).Milliseconds()
+	metadata := make(map[string]any, len(request.Metadata)+10)
 	for key, value := range request.Metadata {
 		metadata[key] = value
 	}
+	metadata["model"] = request.Model
+	metadata["end_time"] = request.EndTime
+	metadata["latency_ms"] = latency
+	metadata["usage"] = request.Usage
+	metadata["model_parameters"] = request.ModelParameters
 	metadata["user_id"] = request.UserID
 	metadata["route"] = request.Route
 	metadata["request_id"] = traceID
 	metadata["apikey_name"] = request.ApiKeyName
 	metadata["api_key_id"] = request.ApiKeyID
-
 	trace := traceBody{
 		ID:          traceID,
 		Timestamp:   request.StartTime,
@@ -212,23 +203,7 @@ func (c *Client) TraceGeneration(request GenerationRequest) {
 	if request.UserName != "" {
 		trace.Tags = []string{"user:" + request.UserName}
 	}
-	c.enqueue("trace-create", request.StartTime, trace)
-	c.enqueue("generation-create", request.StartTime, generationBody{
-		ID:              uuid.NewString(),
-		TraceID:         traceID,
-		Name:            request.Name,
-		StartTime:       request.StartTime,
-		EndTime:         request.EndTime,
-		Model:           request.Model,
-		Environment:     c.environment,
-		ModelParameters: request.ModelParameters,
-		Input:           request.Input,
-		Output:          request.Output,
-		Usage:           request.Usage,
-		Metadata:        metadata,
-		Level:           "DEFAULT",
-	})
-	latency := request.EndTime.Sub(request.StartTime).Milliseconds()
+	c.enqueue(EventTypeTraceCreate, request.StartTime, trace)
 	common.SysLog(fmt.Sprintf("langfuse trace created: trace_id=%s name=%s model=%s user_id=%s session_id=%s route=%s latency_ms=%d", traceID, request.Name, request.Model, request.UserID, request.SessionID, request.Route, latency))
 }
 

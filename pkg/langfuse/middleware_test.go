@@ -55,60 +55,55 @@ func TestMiddlewareRecordsOnlySuccessfulClaudeMessages(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	require.Equal(t, http.StatusOK, response.Code)
-	require.Len(t, client.eventCh, 2)
+	require.Len(t, client.eventCh, 1)
 
 	traceEvent := <-client.eventCh
+	assert.Equal(t, EventTypeTraceCreate, traceEvent.Type)
 	var trace struct {
-		ID        string `json:"id"`
-		UserID    string `json:"userId"`
-		SessionID string `json:"sessionId"`
-		Metadata  map[string]any
+		ID        string          `json:"id"`
+		UserID    string          `json:"userId"`
+		SessionID string          `json:"sessionId"`
+		Input     json.RawMessage `json:"input"`
+		Output    json.RawMessage `json:"output"`
+		Metadata  map[string]any  `json:"metadata"`
 	}
 	require.NoError(t, common.Unmarshal(traceEvent.Body, &trace))
 	assert.Equal(t, "53a170f02952ac9f170aeb796c15dac6-7000b458a8dd3b4c", trace.ID)
 	assert.Equal(t, "aca91010-893b-487d-ae10-faa62f54ae2c", trace.UserID)
 	assert.Equal(t, "session-1", trace.SessionID)
+	assert.JSONEq(t, requestBody, string(trace.Input))
+	assert.JSONEq(t, response.Body.String(), string(trace.Output))
+	assert.Equal(t, "aca91010-893b-487d-ae10-faa62f54ae2c", trace.Metadata["user_id"])
+	assert.Equal(t, "POST /v1/messages", trace.Metadata["route"])
+	assert.Equal(t, "53a170f02952ac9f170aeb796c15dac6-7000b458a8dd3b4c", trace.Metadata["request_id"])
+	assert.Equal(t, "default", trace.Metadata["apikey_name"])
+	assert.Equal(t, "19dd21ec-2ea4-4029-952e-d88c5fb827e9", trace.Metadata["api_key_id"])
+	assert.Equal(t, "claude-sonnet-4", trace.Metadata["model"])
 	assert.Equal(t, map[string]any{
-		"user_id":     "aca91010-893b-487d-ae10-faa62f54ae2c",
-		"route":       "POST /v1/messages",
-		"request_id":  "53a170f02952ac9f170aeb796c15dac6-7000b458a8dd3b4c",
-		"apikey_name": "default",
-		"api_key_id":  "19dd21ec-2ea4-4029-952e-d88c5fb827e9",
-	}, trace.Metadata)
-	generationEvent := <-client.eventCh
-	var generation struct {
-		Input           json.RawMessage `json:"input"`
-		Output          json.RawMessage `json:"output"`
-		Usage           Usage           `json:"usage"`
-		ModelParameters map[string]any  `json:"modelParameters"`
-		Metadata        map[string]any  `json:"metadata"`
-	}
-	require.NoError(t, common.Unmarshal(generationEvent.Body, &generation))
-	assert.JSONEq(t, requestBody, string(generation.Input))
-	assert.JSONEq(t, response.Body.String(), string(generation.Output))
-	assert.Equal(t, Usage{Input: 15, Output: 4, Total: 19}, generation.Usage)
-	assert.Empty(t, generation.ModelParameters)
-	assert.Equal(t, trace.Metadata, generation.Metadata)
+		"input":  float64(15),
+		"output": float64(4),
+		"total":  float64(19),
+	}, trace.Metadata["usage"])
+	assert.Equal(t, map[string]any{}, trace.Metadata["model_parameters"])
+	assert.NotEmpty(t, trace.Metadata["end_time"])
+	assert.GreaterOrEqual(t, trace.Metadata["latency_ms"], float64(0))
 
 	request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	require.Equal(t, http.StatusOK, response.Code)
-	require.Len(t, client.eventCh, 2)
+	require.Len(t, client.eventCh, 1)
 
 	traceEvent = <-client.eventCh
 	require.NoError(t, common.Unmarshal(traceEvent.Body, &trace))
 	assert.Equal(t, "request-1", trace.ID)
 	assert.Equal(t, "123", trace.UserID)
-	assert.Equal(t, map[string]any{
-		"user_id":     "123",
-		"route":       "POST /v1/messages",
-		"request_id":  "request-1",
-		"apikey_name": "default",
-		"api_key_id":  "456",
-	}, trace.Metadata)
-	<-client.eventCh
+	assert.Equal(t, "123", trace.Metadata["user_id"])
+	assert.Equal(t, "POST /v1/messages", trace.Metadata["route"])
+	assert.Equal(t, "request-1", trace.Metadata["request_id"])
+	assert.Equal(t, "default", trace.Metadata["apikey_name"])
+	assert.Equal(t, "456", trace.Metadata["api_key_id"])
 
 	request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4"}`))
 	response = httptest.NewRecorder()
@@ -148,23 +143,16 @@ func TestMiddlewareRecordsForcedClaudeAdaptiveThinkingInput(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	require.Equal(t, http.StatusOK, response.Code)
-	require.Len(t, client.eventCh, 2)
+	require.Len(t, client.eventCh, 1)
 
 	traceEvent := <-client.eventCh
+	assert.Equal(t, EventTypeTraceCreate, traceEvent.Type)
 	var trace struct {
 		Input    json.RawMessage `json:"input"`
 		Output   json.RawMessage `json:"output"`
 		Metadata map[string]any  `json:"metadata"`
 	}
 	require.NoError(t, common.Unmarshal(traceEvent.Body, &trace))
-
-	generationEvent := <-client.eventCh
-	var generation struct {
-		Input           json.RawMessage `json:"input"`
-		Output          json.RawMessage `json:"output"`
-		ModelParameters map[string]any  `json:"modelParameters"`
-	}
-	require.NoError(t, common.Unmarshal(generationEvent.Body, &generation))
 
 	expectedInput := `{
 		"model":"claude-fable-5",
@@ -173,11 +161,10 @@ func TestMiddlewareRecordsForcedClaudeAdaptiveThinkingInput(t *testing.T) {
 		"messages":[{"role":"user","content":"hello"}]
 	}`
 	assert.JSONEq(t, expectedInput, string(trace.Input))
-	assert.JSONEq(t, expectedInput, string(generation.Input))
 	assert.JSONEq(t, response.Body.String(), string(trace.Output))
-	assert.JSONEq(t, response.Body.String(), string(generation.Output))
 	assert.Equal(t, "max", trace.Metadata["thinking_effort"])
-	assert.Equal(t, map[string]any{"thinking_effort": "max"}, generation.ModelParameters)
+	assert.Equal(t, "claude-fable-5", trace.Metadata["model"])
+	assert.Equal(t, map[string]any{"thinking_effort": "max"}, trace.Metadata["model_parameters"])
 }
 
 func TestMiddlewareRecordsCompleteClaudeStream(t *testing.T) {
@@ -202,17 +189,21 @@ func TestMiddlewareRecordsCompleteClaudeStream(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	require.Len(t, client.eventCh, 2)
+	require.Len(t, client.eventCh, 1)
 
-	<-client.eventCh
-	generationEvent := <-client.eventCh
-	var generation struct {
-		Output string `json:"output"`
-		Usage  Usage  `json:"usage"`
+	traceEvent := <-client.eventCh
+	assert.Equal(t, EventTypeTraceCreate, traceEvent.Type)
+	var trace struct {
+		Output   string         `json:"output"`
+		Metadata map[string]any `json:"metadata"`
 	}
-	require.NoError(t, common.Unmarshal(generationEvent.Body, &generation))
-	assert.Equal(t, response.Body.String(), generation.Output)
-	assert.Equal(t, Usage{Input: 9, Output: 5, Total: 14}, generation.Usage)
+	require.NoError(t, common.Unmarshal(traceEvent.Body, &trace))
+	assert.Equal(t, response.Body.String(), trace.Output)
+	assert.Equal(t, map[string]any{
+		"input":  float64(9),
+		"output": float64(5),
+		"total":  float64(14),
+	}, trace.Metadata["usage"])
 }
 
 func TestMiddlewareSkipsFailedClaudeMessages(t *testing.T) {
