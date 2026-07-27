@@ -69,12 +69,11 @@ func TestMiddlewareRecordsOnlySuccessfulClaudeMessages(t *testing.T) {
 	assert.Equal(t, "aca91010-893b-487d-ae10-faa62f54ae2c", trace.UserID)
 	assert.Equal(t, "session-1", trace.SessionID)
 	assert.Equal(t, map[string]any{
-		"user_id":         "aca91010-893b-487d-ae10-faa62f54ae2c",
-		"thinking_effort": "max",
-		"route":           "POST /v1/messages",
-		"request_id":      "53a170f02952ac9f170aeb796c15dac6-7000b458a8dd3b4c",
-		"apikey_name":     "default",
-		"api_key_id":      "19dd21ec-2ea4-4029-952e-d88c5fb827e9",
+		"user_id":     "aca91010-893b-487d-ae10-faa62f54ae2c",
+		"route":       "POST /v1/messages",
+		"request_id":  "53a170f02952ac9f170aeb796c15dac6-7000b458a8dd3b4c",
+		"apikey_name": "default",
+		"api_key_id":  "19dd21ec-2ea4-4029-952e-d88c5fb827e9",
 	}, trace.Metadata)
 	generationEvent := <-client.eventCh
 	var generation struct {
@@ -88,7 +87,7 @@ func TestMiddlewareRecordsOnlySuccessfulClaudeMessages(t *testing.T) {
 	assert.JSONEq(t, requestBody, string(generation.Input))
 	assert.JSONEq(t, response.Body.String(), string(generation.Output))
 	assert.Equal(t, Usage{Input: 15, Output: 4, Total: 19}, generation.Usage)
-	assert.Equal(t, map[string]any{"thinking_effort": "max"}, generation.ModelParameters)
+	assert.Empty(t, generation.ModelParameters)
 	assert.Equal(t, trace.Metadata, generation.Metadata)
 
 	request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
@@ -103,12 +102,11 @@ func TestMiddlewareRecordsOnlySuccessfulClaudeMessages(t *testing.T) {
 	assert.Equal(t, "request-1", trace.ID)
 	assert.Equal(t, "123", trace.UserID)
 	assert.Equal(t, map[string]any{
-		"user_id":         "123",
-		"thinking_effort": "max",
-		"route":           "POST /v1/messages",
-		"request_id":      "request-1",
-		"apikey_name":     "default",
-		"api_key_id":      "456",
+		"user_id":     "123",
+		"route":       "POST /v1/messages",
+		"request_id":  "request-1",
+		"apikey_name": "default",
+		"api_key_id":  "456",
 	}, trace.Metadata)
 	<-client.eventCh
 
@@ -116,6 +114,70 @@ func TestMiddlewareRecordsOnlySuccessfulClaudeMessages(t *testing.T) {
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assert.Empty(t, client.eventCh)
+}
+
+func TestMiddlewareRecordsForcedClaudeAdaptiveThinkingInput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	client, err := NewClient(Config{
+		Enabled:   true,
+		Endpoint:  "http://langfuse.test",
+		PublicKey: "pk",
+		SecretKey: "sk",
+	})
+	require.NoError(t, err)
+
+	router := gin.New()
+	router.POST("/v1/messages", Middleware(client), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"id":    "msg_forced",
+			"type":  "message",
+			"model": "claude-fable-5",
+		})
+	})
+
+	requestBody := `{
+		"model":"claude-fable-5",
+		"thinking":{"type":"enabled","budget_tokens":2048,"display":"summarized"},
+		"output_config":{"effort":"low"},
+		"temperature":0.2,
+		"top_p":0.8,
+		"top_k":20,
+		"messages":[{"role":"user","content":"hello"}]
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Len(t, client.eventCh, 2)
+
+	traceEvent := <-client.eventCh
+	var trace struct {
+		Input    json.RawMessage `json:"input"`
+		Output   json.RawMessage `json:"output"`
+		Metadata map[string]any  `json:"metadata"`
+	}
+	require.NoError(t, common.Unmarshal(traceEvent.Body, &trace))
+
+	generationEvent := <-client.eventCh
+	var generation struct {
+		Input           json.RawMessage `json:"input"`
+		Output          json.RawMessage `json:"output"`
+		ModelParameters map[string]any  `json:"modelParameters"`
+	}
+	require.NoError(t, common.Unmarshal(generationEvent.Body, &generation))
+
+	expectedInput := `{
+		"model":"claude-fable-5",
+		"thinking":{"type":"adaptive","display":"summarized"},
+		"output_config":{"effort":"max"},
+		"messages":[{"role":"user","content":"hello"}]
+	}`
+	assert.JSONEq(t, expectedInput, string(trace.Input))
+	assert.JSONEq(t, expectedInput, string(generation.Input))
+	assert.JSONEq(t, response.Body.String(), string(trace.Output))
+	assert.JSONEq(t, response.Body.String(), string(generation.Output))
+	assert.Equal(t, "max", trace.Metadata["thinking_effort"])
+	assert.Equal(t, map[string]any{"thinking_effort": "max"}, generation.ModelParameters)
 }
 
 func TestMiddlewareRecordsCompleteClaudeStream(t *testing.T) {

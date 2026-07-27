@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -45,12 +46,15 @@ func Middleware(client *Client) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		input := append([]byte(nil), requestBody...)
 		var request dto.ClaudeRequest
-		if err := common.Unmarshal(input, &request); err != nil {
+		if err := common.Unmarshal(requestBody, &request); err != nil {
 			c.Next()
 			return
 		}
+		input := service.ApplyClaudeAdaptiveThinkingJSON(
+			append([]byte(nil), requestBody...),
+			request.Model,
+		)
 
 		writer := &captureWriter{ResponseWriter: c.Writer}
 		c.Writer = writer
@@ -87,11 +91,15 @@ func Middleware(client *Client) gin.HandlerFunc {
 		if apiKeyName == "" {
 			apiKeyName = c.GetString("token_name")
 		}
-		metadata := map[string]any{
-			"thinking_effort": "max",
+		metadata := make(map[string]any)
+		modelParameters := make(map[string]any)
+		thinkingEffort := request.GetEfforts()
+		if service.IsClaudeAdaptiveThinkingModel(request.Model) {
+			thinkingEffort = "max"
 		}
-		modelParameters := map[string]any{
-			"thinking_effort": "max",
+		if thinkingEffort != "" {
+			metadata["thinking_effort"] = thinkingEffort
+			modelParameters["thinking_effort"] = thinkingEffort
 		}
 		client.TraceGeneration(GenerationRequest{
 			TraceID:         traceID,
