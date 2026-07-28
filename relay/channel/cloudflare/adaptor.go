@@ -66,6 +66,10 @@ func (a *Adaptor) ConvertClaudeRequest(_ *gin.Context, info *relaycommon.RelayIn
 }
 
 func normalizeClaudeRequestForREST(request *dto.ClaudeRequest) error {
+	// Cloudflare's REST Messages endpoint rejects this Anthropic beta field,
+	// including when the corresponding anthropic-beta header is present.
+	request.ContextManagement = nil
+
 	systemParts := make([]string, 0, 1)
 	if request.System != nil {
 		systemText, err := claudeSystemTextForREST(request.System)

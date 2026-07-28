@@ -1,6 +1,7 @@
 package cloudflare
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -240,6 +241,46 @@ func TestConvertClaudeRequestPreservesBYOKClaudeSystemShape(t *testing.T) {
 	assert.Equal(t, "claude-opus-5", request.Model)
 	assert.Equal(t, system, request.System)
 	assert.Equal(t, messages, request.Messages)
+}
+
+func TestConvertClaudeRequestOmitsRESTContextManagementAndPreservesBYOK(t *testing.T) {
+	contextManagement := json.RawMessage(`{"edits":[{"type":"clear_tool_uses_20250919"}]}`)
+
+	restRequest := &dto.ClaudeRequest{
+		Model:             "anthropic/claude-opus-5",
+		Messages:          []dto.ClaudeMessage{{Role: "user", Content: "question"}},
+		ContextManagement: contextManagement,
+	}
+	converted, err := (&Adaptor{}).ConvertClaudeRequest(
+		nil,
+		cloudflareRelayInfo(dto.CloudflareAPIModeREST),
+		restRequest,
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, restRequest, converted)
+	assert.Nil(t, restRequest.ContextManagement)
+	body, err := common.Marshal(converted)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), `"context_management"`)
+
+	byokRequest := &dto.ClaudeRequest{
+		Model:             "anthropic/claude-opus-5",
+		Messages:          []dto.ClaudeMessage{{Role: "user", Content: "question"}},
+		ContextManagement: contextManagement,
+	}
+	converted, err = (&Adaptor{}).ConvertClaudeRequest(
+		nil,
+		cloudflareRelayInfo(dto.CloudflareAPIModeBYOK),
+		byokRequest,
+	)
+
+	require.NoError(t, err)
+	assert.Same(t, byokRequest, converted)
+	assert.JSONEq(t, string(contextManagement), string(byokRequest.ContextManagement))
+	body, err = common.Marshal(converted)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"context_management"`)
 }
 
 func TestConvertClaudeRequestRejectsUnrepresentableRESTSystemBlock(t *testing.T) {
