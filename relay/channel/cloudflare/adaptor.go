@@ -137,7 +137,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	}
 	byok := isBYOKMode(info)
 	if err := channel.ValidateCloudflareTarget(info.ApiVersion, byok); err != nil {
-		return "", fmt.Errorf("Cloudflare Other %w", err)
+		return "", fmt.Errorf("cloudflare Other %w", err)
 	}
 
 	baseURL := strings.TrimRight(info.ChannelBaseUrl, "/")
@@ -195,15 +195,17 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 		}
 	}
 
-	if isBYOKMode(info) && info.RelayFormat == types.RelayFormatClaude {
-		req.Set("x-api-key", info.ApiKey)
-		anthropicVersion := c.Request.Header.Get("anthropic-version")
-		if anthropicVersion == "" {
-			anthropicVersion = "2023-06-01"
-		}
-		req.Set("anthropic-version", anthropicVersion)
-		if anthropicBeta := c.Request.Header.Get("anthropic-beta"); anthropicBeta != "" {
-			req.Set("anthropic-beta", anthropicBeta)
+	if isBYOKMode(info) {
+		req.Set("cf-aig-authorization", fmt.Sprintf("Bearer %s", info.ApiKey))
+		if info.RelayFormat == types.RelayFormatClaude {
+			anthropicVersion := c.Request.Header.Get("anthropic-version")
+			if anthropicVersion == "" {
+				anthropicVersion = "2023-06-01"
+			}
+			req.Set("anthropic-version", anthropicVersion)
+			if anthropicBeta := c.Request.Header.Get("anthropic-beta"); anthropicBeta != "" {
+				req.Set("anthropic-beta", anthropicBeta)
+			}
 		}
 		return nil
 	}
@@ -244,16 +246,12 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	// 添加文件字段
 	file, _, err := c.Request.FormFile("file")
 	if err != nil {
 		return nil, errors.New("file is required")
 	}
 	defer file.Close()
-	// 打开临时文件用于保存上传的文件内容
 	requestBody := &bytes.Buffer{}
-
-	// 将上传的文件内容复制到临时文件
 	if _, err := io.Copy(requestBody, file); err != nil {
 		return nil, err
 	}

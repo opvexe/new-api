@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -243,6 +244,105 @@ func TestConvertClaudeRequestPreservesBYOKClaudeSystemShape(t *testing.T) {
 	assert.Equal(t, messages, request.Messages)
 }
 
+func TestConvertClaudeRequestPreservesBYOKNativeToolsAndMCP(t *testing.T) {
+	maxTokens := uint(1024)
+	request := &dto.ClaudeRequest{
+		Model:     "anthropic/claude-sonnet-4-5",
+		MaxTokens: &maxTokens,
+		System:    "Use the supplied context and tools.",
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "Find the Cloudflare AI Gateway web search documentation."},
+		},
+		Tools: []map[string]any{
+			{
+				"name":        "get_context",
+				"description": "Read application context",
+				"input_schema": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			},
+			{
+				"type":     "web_search_20250305",
+				"name":     "web_search",
+				"max_uses": 1,
+			},
+			{
+				"type":            "mcp_toolset",
+				"mcp_server_name": "cloudflare-docs",
+			},
+		},
+		ToolChoice: map[string]any{
+			"type": "auto",
+		},
+		McpServers: json.RawMessage(`[
+			{
+				"type": "url",
+				"url": "https://docs.mcp.cloudflare.com/mcp",
+				"name": "cloudflare-docs"
+			}
+		]`),
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"clear_tool_uses_20250919"}]}`),
+	}
+
+	converted, err := (&Adaptor{}).ConvertClaudeRequest(
+		nil,
+		cloudflareRelayInfo(dto.CloudflareAPIModeBYOK),
+		request,
+	)
+
+	require.NoError(t, err)
+	body, err := common.Marshal(converted)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 1024,
+		"system": "Use the supplied context and tools.",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Find the Cloudflare AI Gateway web search documentation."
+			}
+		],
+		"tools": [
+			{
+				"name": "get_context",
+				"description": "Read application context",
+				"input_schema": {
+					"type": "object",
+					"properties": {}
+				}
+			},
+			{
+				"type": "web_search_20250305",
+				"name": "web_search",
+				"max_uses": 1
+			},
+			{
+				"type": "mcp_toolset",
+				"mcp_server_name": "cloudflare-docs"
+			}
+		],
+		"tool_choice": {
+			"type": "auto"
+		},
+		"mcp_servers": [
+			{
+				"type": "url",
+				"url": "https://docs.mcp.cloudflare.com/mcp",
+				"name": "cloudflare-docs"
+			}
+		],
+		"context_management": {
+			"edits": [
+				{
+					"type": "clear_tool_uses_20250919"
+				}
+			]
+		}
+	}`, string(body))
+}
+
 func TestConvertClaudeRequestOmitsRESTContextManagementAndPreservesBYOK(t *testing.T) {
 	contextManagement := json.RawMessage(`{"edits":[{"type":"clear_tool_uses_20250919"}]}`)
 
@@ -341,14 +441,24 @@ func TestSetupRequestHeaderUsesModeSpecificAuthentication(t *testing.T) {
 			},
 		},
 		{
-			name:        "BYOK Anthropic uses provider key",
+			name:        "BYOK Anthropic uses Cloudflare gateway token",
 			mode:        dto.CloudflareAPIModeBYOK,
 			relayFormat: types.RelayFormatClaude,
 			check: func(t *testing.T, header http.Header) {
 				assert.Empty(t, header.Get("Authorization"))
-				assert.Equal(t, "channel-key", header.Get("x-api-key"))
+				assert.Empty(t, header.Get("x-api-key"))
+				assert.Equal(t, "Bearer channel-key", header.Get("cf-aig-authorization"))
 				assert.Equal(t, "2024-01-01", header.Get("anthropic-version"))
-				assert.Equal(t, "prompt-caching-2024-07-31", header.Get("anthropic-beta"))
+				assert.Equal(t, "mcp-client-2025-11-20", header.Get("anthropic-beta"))
+			},
+		},
+		{
+			name: "BYOK compatibility endpoint uses Cloudflare gateway token",
+			mode: dto.CloudflareAPIModeBYOK,
+			check: func(t *testing.T, header http.Header) {
+				assert.Empty(t, header.Get("Authorization"))
+				assert.Empty(t, header.Get("x-api-key"))
+				assert.Equal(t, "Bearer channel-key", header.Get("cf-aig-authorization"))
 			},
 		},
 	}
@@ -361,7 +471,7 @@ func TestSetupRequestHeaderUsesModeSpecificAuthentication(t *testing.T) {
 			c.Request.Header.Set("cf-aig-cache-ttl", "3600")
 			c.Request.Header.Set("cf-aig-authorization", "client-secret")
 			c.Request.Header.Set("anthropic-version", "2024-01-01")
-			c.Request.Header.Set("anthropic-beta", "prompt-caching-2024-07-31")
+			c.Request.Header.Set("anthropic-beta", "mcp-client-2025-11-20")
 			header := http.Header{}
 			info := cloudflareRelayInfo(test.mode)
 			info.RelayFormat = test.relayFormat
@@ -370,10 +480,79 @@ func TestSetupRequestHeaderUsesModeSpecificAuthentication(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, "3600", header.Get("cf-aig-cache-ttl"))
-			assert.Empty(t, header.Get("cf-aig-authorization"))
 			test.check(t, header)
 		})
 	}
+}
+
+func TestBYOKAnthropicRequestMatchesProviderNativeGatewayProtocol(t *testing.T) {
+	service.InitHttpClient()
+
+	type capturedRequest struct {
+		path   string
+		header http.Header
+		body   []byte
+		err    error
+	}
+	captured := make(chan capturedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		captured <- capturedRequest{
+			path:   r.URL.Path,
+			header: r.Header.Clone(),
+			body:   body,
+			err:    err,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"message"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	maxTokens := uint(1024)
+	request := &dto.ClaudeRequest{
+		Model:     "anthropic/claude-opus-5",
+		MaxTokens: &maxTokens,
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "print 1"},
+		},
+	}
+	info := cloudflareRelayInfo(dto.CloudflareAPIModeBYOK)
+	info.ChannelBaseUrl = server.URL
+	info.RelayFormat = types.RelayFormatClaude
+
+	converted, err := (&Adaptor{}).ConvertClaudeRequest(nil, info, request)
+	require.NoError(t, err)
+	body, err := common.Marshal(converted)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("cf-aig-authorization", "Bearer untrusted-client-token")
+	c.Request.Header.Set("cf-aig-metadata", `{"user_id":"test-user"}`)
+
+	response, err := (&Adaptor{}).DoRequest(c, info, strings.NewReader(string(body)))
+	require.NoError(t, err)
+	httpResponse, ok := response.(*http.Response)
+	require.True(t, ok)
+	require.NoError(t, httpResponse.Body.Close())
+
+	got := <-captured
+	require.NoError(t, got.err)
+	assert.Equal(t, "/v1/account-id/gateway-id/anthropic/v1/messages", got.path)
+	assert.Equal(t, "Bearer channel-key", got.header.Get("cf-aig-authorization"))
+	assert.JSONEq(t, `{"user_id":"test-user"}`, got.header.Get("cf-aig-metadata"))
+	assert.Equal(t, "2023-06-01", got.header.Get("anthropic-version"))
+	assert.Empty(t, got.header.Get("Authorization"))
+	assert.Empty(t, got.header.Get("x-api-key"))
+	assert.JSONEq(t, `{
+		"model": "claude-opus-5",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": "print 1"}
+		]
+	}`, string(got.body))
 }
 
 func TestPassthroughResponseHeadersDoesNotExposeAuthorization(t *testing.T) {

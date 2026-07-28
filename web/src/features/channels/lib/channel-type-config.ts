@@ -161,7 +161,7 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
     defaultBaseUrl: 'https://api.cloudflare.com',
     hints: {
       baseUrl: 'Default: https://api.cloudflare.com',
-      key: 'Cloudflare API token or upstream provider API key',
+      key: 'Cloudflare API token with AI Gateway permission',
       models:
         'Bare model names are supported; provider prefixes are added automatically',
       other: 'Cloudflare account ID, with gateway ID in BYOK mode',

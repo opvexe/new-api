@@ -96,6 +96,24 @@ func TestValidateCloudflareChannelTarget(t *testing.T) {
 	}
 }
 
+func TestBuildTestRequestUsesAnthropicMessagesSchema(t *testing.T) {
+	request := buildTestRequest(
+		"claude-opus-5",
+		string(constant.EndpointTypeAnthropic),
+		&model.Channel{Type: constant.ChannelCloudflare},
+		false,
+	)
+
+	claudeRequest, ok := request.(*dto.ClaudeRequest)
+	require.True(t, ok)
+	assert.Equal(t, "claude-opus-5", claudeRequest.Model)
+	require.NotNil(t, claudeRequest.MaxTokens)
+	assert.Equal(t, uint(16), *claudeRequest.MaxTokens)
+	require.Len(t, claudeRequest.Messages, 1)
+	assert.Equal(t, "user", claudeRequest.Messages[0].Role)
+	assert.Equal(t, "hi", claudeRequest.Messages[0].Content)
+}
+
 func TestCopyChannelRejectsInvalidLegacyProxySettings(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	settingBytes, err := common.Marshal(dto.ChannelSettings{

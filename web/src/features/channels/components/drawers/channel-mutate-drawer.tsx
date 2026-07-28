@@ -2497,7 +2497,7 @@ export function ChannelMutateDrawer({
                                       <FormDescription>
                                         {field.value === 'byok'
                                           ? t(
-                                              'Uses provider-native endpoints and an upstream provider API key.'
+                                              'Uses provider-native endpoints with a Cloudflare AI Gateway token.'
                                             )
                                           : t(
                                               'Uses Cloudflare Unified Billing and a Cloudflare API token.'
@@ -2539,7 +2539,7 @@ export function ChannelMutateDrawer({
                                             )}
                                             <br />
                                             {t(
-                                              'If gateway authentication is enabled, set cf-aig-authorization in Header Override.'
+                                              'The API key is sent as cf-aig-authorization automatically.'
                                             )}
                                           </>
                                         ) : (
@@ -3011,15 +3011,7 @@ export function ChannelMutateDrawer({
                                   let keyPlaceholder = t(
                                     getKeyPromptForType(currentType)
                                   )
-                                  if (
-                                    !isEditing &&
-                                    currentType === 39 &&
-                                    currentCloudflareAPIMode === 'byok'
-                                  ) {
-                                    keyPlaceholder = t(
-                                      'Enter the upstream provider API key for this channel'
-                                    )
-                                  } else if (isEditing) {
+                                  if (isEditing) {
                                     keyPlaceholder = t(
                                       'Leave empty to keep existing key'
                                     )
@@ -3083,7 +3075,7 @@ export function ChannelMutateDrawer({
                                     keyDescription =
                                       currentCloudflareAPIMode === 'byok'
                                         ? t(
-                                            'Uses provider-native endpoints and an upstream provider API key.'
+                                            'Uses provider-native endpoints with a Cloudflare AI Gateway token.'
                                           )
                                         : t(
                                             'Uses Cloudflare Unified Billing and a Cloudflare API token.'
