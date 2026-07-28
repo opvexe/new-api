@@ -7,7 +7,12 @@ import (
 )
 
 func TestApplyClaudeAdaptiveThinkingJSONForSupportedModels(t *testing.T) {
-	for _, model := range []string{"claude-fable-5", "claude-opus-5"} {
+	for _, model := range []string{
+		"claude-fable-5",
+		"claude-opus-5",
+		"anthropic/claude-fable-5",
+		"anthropic/claude-opus-5",
+	} {
 		t.Run(model, func(t *testing.T) {
 			rawJSON := []byte(`{
 				"model":"` + model + `",

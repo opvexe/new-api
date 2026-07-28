@@ -1,11 +1,14 @@
 package service
 
 import (
+	"strings"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 func IsClaudeAdaptiveThinkingModel(model string) bool {
+	model = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(model)), "anthropic/")
 	return model == "claude-fable-5" || model == "claude-opus-5"
 }
 
