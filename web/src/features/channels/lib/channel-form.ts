@@ -231,6 +231,7 @@ export const channelFormSchema = z
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
     aws_key_type: z.enum(['ak_sk', 'api_key']).optional(), // AWS specific
+    cloudflare_api_mode: z.enum(['rest', 'byok']).optional(), // Cloudflare specific
     azure_responses_version: z.string().optional(), // Azure specific
     // Field passthrough controls (stored in settings JSON)
     allow_service_tier: z.boolean().optional(), // OpenAI/Anthropic
@@ -292,6 +293,24 @@ export const channelFormSchema = z
         'other',
         'This channel type requires additional configuration'
       )
+    }
+
+    if (
+      data.type === 39 &&
+      data.cloudflare_api_mode === 'byok' &&
+      data.other?.trim() &&
+      !/^[^/\s]+\/[^/\s]+$/.test(data.other)
+    ) {
+      addRequiredIssue(ctx, 'other', 'Format must be {account_id}/{gateway_id}')
+    }
+
+    if (
+      data.type === 39 &&
+      data.cloudflare_api_mode !== 'byok' &&
+      data.other?.trim() &&
+      !/^[^/\s]+$/.test(data.other)
+    ) {
+      addRequiredIssue(ctx, 'other', 'Enter exactly one Cloudflare Account ID')
     }
 
     if (data.type === 57) {
@@ -381,6 +400,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   is_enterprise_account: false,
   vertex_key_type: 'json',
   aws_key_type: 'ak_sk',
+  cloudflare_api_mode: 'rest',
   azure_responses_version: '',
   // Field passthrough controls
   allow_service_tier: false,
@@ -439,6 +459,7 @@ export function transformChannelToFormDefaults(
   let azureResponsesVersion = ''
   let isEnterpriseAccount = false
   let awsKeyType: 'ak_sk' | 'api_key' = 'ak_sk'
+  let cloudflareAPIMode: 'rest' | 'byok' = 'rest'
   let allowServiceTier = false
   let disableStore = false
   let allowSafetyIdentifier = false
@@ -459,6 +480,7 @@ export function transformChannelToFormDefaults(
       azureResponsesVersion = parsed.azure_responses_version || ''
       isEnterpriseAccount = parsed.openrouter_enterprise === true
       awsKeyType = parsed.aws_key_type || 'ak_sk'
+      cloudflareAPIMode = parsed.cloudflare_api_mode || 'rest'
       allowServiceTier = parsed.allow_service_tier === true
       disableStore = parsed.disable_store === true
       allowSafetyIdentifier = parsed.allow_safety_identifier === true
@@ -518,6 +540,7 @@ export function transformChannelToFormDefaults(
     vertex_key_type: vertexKeyType,
     azure_responses_version: azureResponsesVersion,
     aws_key_type: awsKeyType,
+    cloudflare_api_mode: cloudflareAPIMode,
     allow_service_tier: allowServiceTier,
     disable_store: disableStore,
     allow_include_obfuscation: allowIncludeObfuscation,
@@ -590,6 +613,12 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     settingsObj.aws_key_type = formData.aws_key_type || 'ak_sk'
   } else if ('aws_key_type' in settingsObj) {
     delete settingsObj.aws_key_type
+  }
+
+  if (formData.type === 39) {
+    settingsObj.cloudflare_api_mode = formData.cloudflare_api_mode || 'rest'
+  } else if ('cloudflare_api_mode' in settingsObj) {
+    delete settingsObj.cloudflare_api_mode
   }
 
   // Field passthrough controls:

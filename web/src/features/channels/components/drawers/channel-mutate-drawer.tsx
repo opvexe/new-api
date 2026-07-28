@@ -280,6 +280,7 @@ const SENSITIVE_FORM_FIELDS = [
   'is_enterprise_account',
   'vertex_key_type',
   'aws_key_type',
+  'cloudflare_api_mode',
   'azure_responses_version',
   'force_format',
   'thinking_to_content',
@@ -754,6 +755,7 @@ export function ChannelMutateDrawer({
   const currentAllowInferenceGeo = form.watch('allow_inference_geo')
   const currentAllowSpeed = form.watch('allow_speed')
   const currentClaudeBetaQuery = form.watch('claude_beta_query')
+  const currentCloudflareAPIMode = form.watch('cloudflare_api_mode') || 'rest'
   const currentUpstreamModelUpdateAutoSyncEnabled = form.watch(
     'upstream_model_update_auto_sync_enabled'
   )
@@ -952,6 +954,7 @@ export function ChannelMutateDrawer({
     formErrors.key_mode ||
     formErrors.vertex_key_type ||
     formErrors.aws_key_type ||
+    formErrors.cloudflare_api_mode ||
     formErrors.azure_responses_version
   )
   const modelsHaveErrors = Boolean(
@@ -2427,29 +2430,127 @@ export function ChannelMutateDrawer({
                               />
                             )}
 
-                            {/* Cloudflare Workers AI (type 39) */}
+                            {/* Cloudflare REST API / Gateway BYOK (type 39) */}
                             {currentType === 39 && (
-                              <FormField
-                                control={form.control}
-                                name='other'
-                                render={({ field }) => (
-                                  <FormItem>
-                                    <FormLabel>{t('Account ID *')}</FormLabel>
-                                    <FormControl>
-                                      <Input
-                                        placeholder={t(
-                                          'e.g., d6b5da8hk1awo8nap34ube6gh'
+                              <>
+                                <FormField
+                                  control={form.control}
+                                  name='cloudflare_api_mode'
+                                  render={({ field }) => (
+                                    <FormItem>
+                                      <FormLabel>
+                                        {t('Cloudflare API Mode')}
+                                      </FormLabel>
+                                      <Select
+                                        items={[
+                                          {
+                                            value: 'rest',
+                                            label: t('REST API (Recommended)'),
+                                          },
+                                          {
+                                            value: 'byok',
+                                            label: `${t('Cloudflare AI Gateway')} (BYOK)`,
+                                          },
+                                        ]}
+                                        onValueChange={(value) => {
+                                          field.onChange(value)
+                                          const baseURL =
+                                            form.getValues('base_url')
+                                          if (
+                                            !baseURL ||
+                                            baseURL ===
+                                              'https://api.cloudflare.com' ||
+                                            baseURL ===
+                                              'https://gateway.ai.cloudflare.com'
+                                          ) {
+                                            form.setValue(
+                                              'base_url',
+                                              value === 'byok'
+                                                ? 'https://gateway.ai.cloudflare.com'
+                                                : 'https://api.cloudflare.com',
+                                              { shouldDirty: true }
+                                            )
+                                          }
+                                          void form.trigger('other')
+                                        }}
+                                        value={field.value || 'rest'}
+                                      >
+                                        <FormControl>
+                                          <SelectTrigger>
+                                            <SelectValue />
+                                          </SelectTrigger>
+                                        </FormControl>
+                                        <SelectContent
+                                          alignItemWithTrigger={false}
+                                        >
+                                          <SelectGroup>
+                                            <SelectItem value='rest'>
+                                              {t('REST API (Recommended)')}
+                                            </SelectItem>
+                                            <SelectItem value='byok'>
+                                              {t('Cloudflare AI Gateway')}{' '}
+                                              (BYOK)
+                                            </SelectItem>
+                                          </SelectGroup>
+                                        </SelectContent>
+                                      </Select>
+                                      <FormDescription>
+                                        {field.value === 'byok'
+                                          ? t(
+                                              'Uses provider-native endpoints and an upstream provider API key.'
+                                            )
+                                          : t(
+                                              'Uses Cloudflare Unified Billing and a Cloudflare API token.'
+                                            )}
+                                      </FormDescription>
+                                      <FormMessage />
+                                    </FormItem>
+                                  )}
+                                />
+                                <FormField
+                                  control={form.control}
+                                  name='other'
+                                  render={({ field }) => (
+                                    <FormItem>
+                                      <FormLabel>
+                                        {currentCloudflareAPIMode === 'byok'
+                                          ? t('Account ID / Gateway ID *')
+                                          : t('Account ID *')}
+                                      </FormLabel>
+                                      <FormControl>
+                                        <Input
+                                          placeholder={
+                                            currentCloudflareAPIMode === 'byok'
+                                              ? t(
+                                                  'e.g., d6b5da8hk1awo8nap34ube6gh/default'
+                                                )
+                                              : t(
+                                                  'e.g., d6b5da8hk1awo8nap34ube6gh'
+                                                )
+                                          }
+                                          {...field}
+                                        />
+                                      </FormControl>
+                                      <FormDescription>
+                                        {currentCloudflareAPIMode === 'byok' ? (
+                                          <>
+                                            {t(
+                                              'Format: {account_id}/{gateway_id}. The default gateway is "default".'
+                                            )}
+                                            <br />
+                                            {t(
+                                              'If gateway authentication is enabled, set cf-aig-authorization in Header Override.'
+                                            )}
+                                          </>
+                                        ) : (
+                                          t('Your Cloudflare Account ID')
                                         )}
-                                        {...field}
-                                      />
-                                    </FormControl>
-                                    <FormDescription>
-                                      {t('Your Cloudflare Account ID')}
-                                    </FormDescription>
-                                    <FormMessage />
-                                  </FormItem>
-                                )}
-                              />
+                                      </FormDescription>
+                                      <FormMessage />
+                                    </FormItem>
+                                  )}
+                                />
+                              </>
                             )}
 
                             {/* SiliconFlow (type 40) */}
@@ -2910,7 +3011,15 @@ export function ChannelMutateDrawer({
                                   let keyPlaceholder = t(
                                     getKeyPromptForType(currentType)
                                   )
-                                  if (isEditing) {
+                                  if (
+                                    !isEditing &&
+                                    currentType === 39 &&
+                                    currentCloudflareAPIMode === 'byok'
+                                  ) {
+                                    keyPlaceholder = t(
+                                      'Enter the upstream provider API key for this channel'
+                                    )
+                                  } else if (isEditing) {
                                     keyPlaceholder = t(
                                       'Leave empty to keep existing key'
                                     )
@@ -2970,6 +3079,15 @@ export function ChannelMutateDrawer({
                                         )}
                                       </>
                                     )
+                                  } else if (currentType === 39) {
+                                    keyDescription =
+                                      currentCloudflareAPIMode === 'byok'
+                                        ? t(
+                                            'Uses provider-native endpoints and an upstream provider API key.'
+                                          )
+                                        : t(
+                                            'Uses Cloudflare Unified Billing and a Cloudflare API token.'
+                                          )
                                   } else if (isBatchMode) {
                                     keyDescription = t(
                                       'Enter one API key per line for batch creation'

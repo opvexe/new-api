@@ -1,17 +1,13 @@
 package cloudflare
 
 import (
-	"bufio"
-	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
-	"time"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/samber/lo"
@@ -29,94 +25,87 @@ func convertCf2CompletionsRequest(textRequest dto.GeneralOpenAIRequest) *CfReque
 	}
 }
 
-func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
-	scanner := helper.NewStreamScanner(resp.Body)
-	scanner.Split(bufio.ScanLines)
+func cfChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
+	defer service.CloseResponseBodyGracefully(resp)
 
-	helper.SetEventStreamHeaders(c)
-	id := helper.GetResponseID(c)
-	var responseText string
-	isFirst := true
-
-	for scanner.Scan() {
-		data := scanner.Text()
-		if len(data) < len("data: ") {
-			continue
-		}
-		data = strings.TrimPrefix(data, "data: ")
-		data = strings.TrimSuffix(data, "\r")
-
-		if data == "[DONE]" {
-			break
-		}
-
-		var response dto.ChatCompletionsStreamResponse
-		err := json.Unmarshal([]byte(data), &response)
-		if err != nil {
-			logger.LogError(c, "error_unmarshalling_stream_response: "+err.Error())
-			continue
-		}
-		for _, choice := range response.Choices {
-			choice.Delta.Role = "assistant"
-			responseText += choice.Delta.GetContentString()
-		}
-		response.Id = id
-		response.Model = info.UpstreamModelName
-		err = helper.ObjectData(c, response)
-		if isFirst {
-			isFirst = false
-			info.FirstResponseTime = time.Now()
-		}
-		if err != nil {
-			logger.LogError(c, "error_rendering_stream_response: "+err.Error())
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		logger.LogError(c, "error_scanning_stream_response: "+err.Error())
-	}
-	usage := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
-	if info.ShouldIncludeUsage {
-		response := helper.GenerateFinalUsageResponse(id, info.StartTime.Unix(), info.UpstreamModelName, *usage)
-		err := helper.ObjectData(c, response)
-		if err != nil {
-			logger.LogError(c, "error_rendering_final_usage_response: "+err.Error())
-		}
-	}
-	helper.Done(c)
-
-	service.CloseResponseBodyGracefully(resp)
-
-	return nil, usage
-}
-
-func cfHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
+		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
-	var response dto.TextResponse
-	err = json.Unmarshal(responseBody, &response)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
+
+	var response dto.OpenAITextResponse
+	if err = common.Unmarshal(responseBody, &response); err != nil {
+		return types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError), nil
 	}
-	response.Model = info.UpstreamModelName
+
+	if oaiError := response.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+		return types.WithOpenAIError(*oaiError, resp.StatusCode), nil
+	}
+
 	var responseText string
 	for _, choice := range response.Choices {
-		responseText += choice.Message.StringContent()
+		if choice.FinishReason == constant.FinishReasonContentFilter {
+			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "openai_finish_reason=content_filter")
+		}
+		for _, toolCall := range choice.Message.ParseToolCalls() {
+			info.CountBillableToolCall(dto.BuildInCallFunctionCall, toolCall.Function.Name)
+		}
+		responseText += choice.Message.StringContent() + choice.Message.GetReasoningContent()
 	}
-	usage := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
-	response.Usage = *usage
-	response.Id = helper.GetResponseID(c)
-	jsonResponse, err := json.Marshal(response)
+
+	usage := response.Usage
+	if usage.PromptTokens == 0 && usage.InputTokens > 0 {
+		usage.PromptTokens = usage.InputTokens
+	}
+	if usage.CompletionTokens == 0 && usage.OutputTokens > 0 {
+		usage.CompletionTokens = usage.OutputTokens
+	}
+	if usage.TotalTokens == 0 && (usage.PromptTokens > 0 || usage.CompletionTokens > 0) {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	if !service.ValidUsage(&usage) {
+		usage = *service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
+	}
+
+	service.IOCopyBytesGracefully(c, resp, responseBody)
+	return nil, &usage
+}
+
+func cfEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
+	defer service.CloseResponseBodyGracefully(resp)
+
+	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
+		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
-	c.Writer.Header().Set("Content-Type", "application/json")
-	c.Writer.WriteHeader(resp.StatusCode)
-	_, _ = c.Writer.Write(jsonResponse)
-	return nil, usage
+
+	// Parse only the shared response envelope so base64 embeddings and future
+	// provider-specific data fields remain opaque and are forwarded unchanged.
+	var response dto.SimpleResponse
+	if err = common.Unmarshal(responseBody, &response); err != nil {
+		return types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError), nil
+	}
+
+	if oaiError := response.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+		return types.WithOpenAIError(*oaiError, resp.StatusCode), nil
+	}
+
+	usage := response.Usage
+	if usage.PromptTokens == 0 && usage.InputTokens > 0 {
+		usage.PromptTokens = usage.InputTokens
+	}
+	if usage.CompletionTokens == 0 && usage.OutputTokens > 0 {
+		usage.CompletionTokens = usage.OutputTokens
+	}
+	if usage.TotalTokens == 0 && (usage.PromptTokens > 0 || usage.CompletionTokens > 0) {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	if !service.ValidUsage(&usage) {
+		usage = *service.ResponseText2Usage(c, "", info.UpstreamModelName, info.GetEstimatePromptTokens())
+	}
+
+	service.IOCopyBytesGracefully(c, resp, responseBody)
+	return nil, &usage
 }
 
 func cfSTTHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
@@ -126,7 +115,7 @@ func cfSTTHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	service.CloseResponseBodyGracefully(resp)
-	err = json.Unmarshal(responseBody, &cfResp)
+	err = common.Unmarshal(responseBody, &cfResp)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
@@ -135,7 +124,7 @@ func cfSTTHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 		Text: cfResp.Result.Text,
 	}
 
-	jsonResponse, err := json.Marshal(audioResp)
+	jsonResponse, err := common.Marshal(audioResp)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}

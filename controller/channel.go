@@ -511,6 +511,21 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		}
 	}
 
+	if channel.Type == constant.ChannelCloudflare {
+		cloudflareMode := channel.GetOtherSettings().CloudflareAPIMode
+		if cloudflareMode != "" &&
+			cloudflareMode != dto.CloudflareAPIModeREST &&
+			cloudflareMode != dto.CloudflareAPIModeBYOK {
+			return fmt.Errorf("unsupported Cloudflare API mode: %s", cloudflareMode)
+		}
+		if err := relaychannel.ValidateCloudflareTarget(
+			channel.Other,
+			cloudflareMode == dto.CloudflareAPIModeBYOK,
+		); err != nil {
+			return fmt.Errorf("Cloudflare Other %w", err)
+		}
+	}
+
 	// Codex OAuth key validation (optional, only when JSON object is provided)
 	if channel.Type == constant.ChannelTypeCodex {
 		trimmedKey := strings.TrimSpace(channel.Key)

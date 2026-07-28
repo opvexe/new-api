@@ -154,6 +154,19 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Models fetched from upstream /v1/models',
     },
   },
+  39: {
+    id: 39,
+    name: CHANNEL_TYPES[39],
+    icon: 'cloudflare',
+    defaultBaseUrl: 'https://api.cloudflare.com',
+    hints: {
+      baseUrl: 'Default: https://api.cloudflare.com',
+      key: 'Cloudflare API token or upstream provider API key',
+      models:
+        'Bare model names are supported; provider prefixes are added automatically',
+      other: 'Cloudflare account ID, with gateway ID in BYOK mode',
+    },
+  },
 }
 
 /**

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/claude"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -20,35 +22,120 @@ import (
 type Adaptor struct {
 }
 
+const (
+	restAPIBaseURL = "https://api.cloudflare.com"
+	byokBaseURL    = "https://gateway.ai.cloudflare.com"
+)
+
+var passthroughResponseHeaders = []string{
+	"cf-aig-cache-status",
+	"cf-aig-cache-ttl",
+	"cf-aig-event-id",
+	"cf-aig-log-id",
+	"cf-aig-request-id",
+	"cf-ray",
+}
+
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
 	//TODO implement me
 	return nil, errors.New("not implemented")
 }
 
-func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	//TODO implement me
-	panic("implement me")
-	return nil, nil
+func (a *Adaptor) ConvertClaudeRequest(_ *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+	if isBYOKMode(info) {
+		const anthropicPrefix = "anthropic/"
+		if strings.HasPrefix(strings.ToLower(request.Model), anthropicPrefix) {
+			request.Model = request.Model[len(anthropicPrefix):]
+		}
+	} else {
+		request.Model = qualifyModel(request.Model, false)
+	}
+	return request, nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	if info == nil {
+		return "", errors.New("relay info is nil")
+	}
+	byok := isBYOKMode(info)
+	if err := channel.ValidateCloudflareTarget(info.ApiVersion, byok); err != nil {
+		return "", fmt.Errorf("Cloudflare Other %w", err)
+	}
+
+	baseURL := strings.TrimRight(info.ChannelBaseUrl, "/")
+	if byok {
+		if baseURL == "" || baseURL == restAPIBaseURL {
+			baseURL = byokBaseURL
+		}
+		if info.RelayFormat == types.RelayFormatClaude {
+			return fmt.Sprintf("%s/v1/%s/anthropic/v1/messages", baseURL, info.ApiVersion), nil
+		}
+		switch info.RelayMode {
+		case constant.RelayModeChatCompletions:
+			return fmt.Sprintf("%s/v1/%s/compat/chat/completions", baseURL, info.ApiVersion), nil
+		case constant.RelayModeEmbeddings:
+			return fmt.Sprintf("%s/v1/%s/compat/embeddings", baseURL, info.ApiVersion), nil
+		case constant.RelayModeResponses:
+			return fmt.Sprintf("%s/v1/%s/compat/responses", baseURL, info.ApiVersion), nil
+		default:
+			return fmt.Sprintf("%s/v1/%s/compat%s", baseURL, info.ApiVersion, info.RequestURLPath), nil
+		}
+	}
+
+	if baseURL == "" || baseURL == byokBaseURL {
+		baseURL = restAPIBaseURL
+	}
+	if info.RelayFormat == types.RelayFormatClaude {
+		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/messages", baseURL, info.ApiVersion), nil
+	}
 	switch info.RelayMode {
 	case constant.RelayModeChatCompletions:
-		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/chat/completions", info.ChannelBaseUrl, info.ApiVersion), nil
+		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/chat/completions", baseURL, info.ApiVersion), nil
 	case constant.RelayModeEmbeddings:
-		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/embeddings", info.ChannelBaseUrl, info.ApiVersion), nil
+		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/embeddings", baseURL, info.ApiVersion), nil
 	case constant.RelayModeResponses:
-		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/responses", info.ChannelBaseUrl, info.ApiVersion), nil
+		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/v1/responses", baseURL, info.ApiVersion), nil
 	default:
-		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/run/%s", info.ChannelBaseUrl, info.ApiVersion, info.UpstreamModelName), nil
+		return fmt.Sprintf("%s/client/v4/accounts/%s/ai/run/%s", baseURL, info.ApiVersion, info.UpstreamModelName), nil
 	}
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {
 	channel.SetupApiRequestHeader(info, c, req)
+	req.Del("x-api-key")
+	req.Del("cf-aig-authorization")
+	req.Del("Authorization")
+
+	for name, values := range c.Request.Header {
+		lowerName := strings.ToLower(name)
+		if !strings.HasPrefix(lowerName, "cf-aig-") || lowerName == "cf-aig-authorization" {
+			continue
+		}
+		req.Del(name)
+		for _, value := range values {
+			req.Add(name, value)
+		}
+	}
+
+	if isBYOKMode(info) && info.RelayFormat == types.RelayFormatClaude {
+		req.Set("x-api-key", info.ApiKey)
+		anthropicVersion := c.Request.Header.Get("anthropic-version")
+		if anthropicVersion == "" {
+			anthropicVersion = "2023-06-01"
+		}
+		req.Set("anthropic-version", anthropicVersion)
+		if anthropicBeta := c.Request.Header.Get("anthropic-beta"); anthropicBeta != "" {
+			req.Set("anthropic-beta", anthropicBeta)
+		}
+		return nil
+	}
+
 	req.Set("Authorization", fmt.Sprintf("Bearer %s", info.ApiKey))
 	return nil
 }
@@ -61,11 +148,13 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	case constant.RelayModeCompletions:
 		return convertCf2CompletionsRequest(*request), nil
 	default:
+		request.Model = qualifyModel(request.Model, isBYOKMode(info))
 		return request, nil
 	}
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	request.Model = qualifyModel(request.Model, isBYOKMode(info))
 	return request, nil
 }
 
@@ -78,6 +167,7 @@ func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dt
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
+	request.Model = qualifyModel(request.Model, isBYOKMode(info))
 	return request, nil
 }
 
@@ -104,15 +194,23 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	a.passthroughResponseHeaders(c, resp)
+	if info.RelayFormat == types.RelayFormatClaude {
+		info.FinalRequestRelayFormat = types.RelayFormatClaude
+		if info.IsStream {
+			return claude.ClaudeStreamHandler(c, resp, info)
+		}
+		return claude.ClaudeHandler(c, resp, info)
+	}
+
 	switch info.RelayMode {
 	case constant.RelayModeEmbeddings:
-		fallthrough
+		err, usage = cfEmbeddingHandler(c, info, resp)
 	case constant.RelayModeChatCompletions:
 		if info.IsStream {
-			err, usage = cfStreamHandler(c, info, resp)
-		} else {
-			err, usage = cfHandler(c, info, resp)
+			return openai.OaiStreamHandler(c, info, resp)
 		}
+		err, usage = cfChatHandler(c, info, resp)
 	case constant.RelayModeResponses:
 		if info.IsStream {
 			usage, err = openai.OaiResponsesStreamHandler(c, info, resp)
@@ -133,4 +231,72 @@ func (a *Adaptor) GetModelList() []string {
 
 func (a *Adaptor) GetChannelName() string {
 	return ChannelName
+}
+
+func isBYOKMode(info *relaycommon.RelayInfo) bool {
+	return info != nil && info.ChannelMeta != nil &&
+		info.ChannelOtherSettings.CloudflareAPIMode == dto.CloudflareAPIModeBYOK
+}
+
+func qualifyModel(model string, byok bool) string {
+	if model == "" {
+		return model
+	}
+	lowerModel := strings.ToLower(model)
+	if strings.HasPrefix(lowerModel, "@cf/") {
+		if byok {
+			return "workers-ai/" + model
+		}
+		return model
+	}
+	if strings.Contains(model, "/") {
+		return model
+	}
+	switch {
+	case strings.HasPrefix(lowerModel, "claude"):
+		return "anthropic/" + model
+	case strings.HasPrefix(lowerModel, "gemini"):
+		if byok {
+			return "google-ai-studio/" + model
+		}
+		return "google/" + model
+	case strings.HasPrefix(lowerModel, "grok"):
+		if byok {
+			return "grok/" + model
+		}
+		return "xai/" + model
+	case strings.HasPrefix(lowerModel, "deepseek"):
+		return "deepseek/" + model
+	case strings.HasPrefix(lowerModel, "command"):
+		return "cohere/" + model
+	case strings.HasPrefix(lowerModel, "mistral"), strings.HasPrefix(lowerModel, "codestral"):
+		return "mistral/" + model
+	default:
+		return "openai/" + model
+	}
+}
+
+func (a *Adaptor) passthroughResponseHeaders(c *gin.Context, resp *http.Response) {
+	if c == nil || c.Writer == nil || resp == nil {
+		return
+	}
+	knownHeaders := make(map[string]struct{}, len(passthroughResponseHeaders))
+	for _, name := range passthroughResponseHeaders {
+		knownHeaders[name] = struct{}{}
+		for _, value := range resp.Header.Values(name) {
+			c.Writer.Header().Add(name, value)
+		}
+	}
+	for name, values := range resp.Header {
+		lowerName := strings.ToLower(name)
+		if !strings.HasPrefix(lowerName, "cf-aig-") || lowerName == "cf-aig-authorization" {
+			continue
+		}
+		if _, ok := knownHeaders[lowerName]; ok {
+			continue
+		}
+		for _, value := range values {
+			c.Writer.Header().Add(name, value)
+		}
+	}
 }

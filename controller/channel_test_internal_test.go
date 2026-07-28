@@ -56,6 +56,46 @@ func TestValidateChannelProxy(t *testing.T) {
 	}
 }
 
+func TestValidateCloudflareChannelTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    dto.CloudflareAPIMode
+		other   string
+		wantErr bool
+	}{
+		{name: "REST valid", mode: dto.CloudflareAPIModeREST, other: "account-id"},
+		{name: "REST legacy default", other: "account-id"},
+		{name: "REST rejects gateway", mode: dto.CloudflareAPIModeREST, other: "account-id/gateway-id", wantErr: true},
+		{name: "BYOK valid", mode: dto.CloudflareAPIModeBYOK, other: "account-id/gateway-id"},
+		{name: "BYOK missing gateway", mode: dto.CloudflareAPIModeBYOK, other: "account-id", wantErr: true},
+		{name: "BYOK empty account", mode: dto.CloudflareAPIModeBYOK, other: "/gateway-id", wantErr: true},
+		{name: "BYOK extra segment", mode: dto.CloudflareAPIModeBYOK, other: "account-id/gateway-id/extra", wantErr: true},
+		{name: "unsupported mode", mode: "invalid", other: "account-id", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			settings, err := common.Marshal(dto.ChannelOtherSettings{
+				CloudflareAPIMode: test.mode,
+			})
+			require.NoError(t, err)
+			channel := &model.Channel{
+				Type:          constant.ChannelCloudflare,
+				Other:         test.other,
+				OtherSettings: string(settings),
+			}
+
+			err = validateChannel(channel, false)
+
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestCopyChannelRejectsInvalidLegacyProxySettings(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	settingBytes, err := common.Marshal(dto.ChannelSettings{
