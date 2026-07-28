@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
@@ -52,8 +53,75 @@ func (a *Adaptor) ConvertClaudeRequest(_ *gin.Context, info *relaycommon.RelayIn
 		}
 	} else {
 		request.Model = qualifyModel(request.Model, false)
+		if err := normalizeClaudeRequestForREST(request); err != nil {
+			return nil, types.NewErrorWithStatusCode(
+				fmt.Errorf("invalid Cloudflare REST Claude request: %w", err),
+				types.ErrorCodeBadRequestBody,
+				http.StatusBadRequest,
+				types.ErrOptionWithSkipRetry(),
+			)
+		}
 	}
 	return request, nil
+}
+
+func normalizeClaudeRequestForREST(request *dto.ClaudeRequest) error {
+	systemParts := make([]string, 0, 1)
+	if request.System != nil {
+		systemText, err := claudeSystemTextForREST(request.System)
+		if err != nil {
+			return fmt.Errorf("invalid system: %w", err)
+		}
+		request.System = systemText
+		if systemText != "" {
+			systemParts = append(systemParts, systemText)
+		}
+	}
+
+	messages := make([]dto.ClaudeMessage, 0, len(request.Messages))
+	for i, message := range request.Messages {
+		if message.Role != "system" && message.Role != "developer" {
+			messages = append(messages, message)
+			continue
+		}
+
+		systemText, err := claudeSystemTextForREST(message.Content)
+		if err != nil {
+			return fmt.Errorf("invalid messages[%d] %s content: %w", i, message.Role, err)
+		}
+		if systemText != "" {
+			systemParts = append(systemParts, systemText)
+		}
+	}
+	request.Messages = messages
+
+	if len(systemParts) > 0 {
+		request.System = strings.Join(systemParts, "\n")
+	}
+	return nil
+}
+
+func claudeSystemTextForREST(content any) (string, error) {
+	if content == nil {
+		return "", nil
+	}
+	if text, ok := content.(string); ok {
+		return text, nil
+	}
+
+	blocks, err := common.Any2Type[[]dto.ClaudeMediaMessage](content)
+	if err != nil {
+		return "", errors.New("expected a string or an array of text blocks")
+	}
+
+	texts := make([]string, 0, len(blocks))
+	for i, block := range blocks {
+		if block.Type != dto.ContentTypeText || block.Text == nil {
+			return "", fmt.Errorf("block %d must be a text block", i)
+		}
+		texts = append(texts, block.GetText())
+	}
+	return strings.Join(texts, "\n"), nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {

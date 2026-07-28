@@ -172,6 +172,95 @@ func TestConvertClaudeRequestUsesModeSpecificModel(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestNormalizesRESTSystemCompatibility(t *testing.T) {
+	adaptor := &Adaptor{}
+	request := &dto.ClaudeRequest{
+		Model: "claude-opus-5",
+		System: []map[string]any{
+			{
+				"type": "text",
+				"text": "global instruction",
+				"cache_control": map[string]any{
+					"type": "ephemeral",
+				},
+			},
+			{
+				"type": "text",
+				"text": "second instruction",
+			},
+		},
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "question"},
+			{
+				Role: "system",
+				Content: []map[string]any{
+					{"type": "text", "text": "mid-conversation instruction"},
+				},
+			},
+			{Role: "developer", Content: "developer instruction"},
+			{Role: "assistant", Content: "answer"},
+		},
+	}
+
+	converted, err := adaptor.ConvertClaudeRequest(nil, cloudflareRelayInfo(dto.CloudflareAPIModeREST), request)
+
+	require.NoError(t, err)
+	assert.Same(t, request, converted)
+	assert.Equal(t, "anthropic/claude-opus-5", request.Model)
+	assert.Equal(
+		t,
+		"global instruction\nsecond instruction\nmid-conversation instruction\ndeveloper instruction",
+		request.System,
+	)
+	assert.Equal(t, []dto.ClaudeMessage{
+		{Role: "user", Content: "question"},
+		{Role: "assistant", Content: "answer"},
+	}, request.Messages)
+}
+
+func TestConvertClaudeRequestPreservesBYOKClaudeSystemShape(t *testing.T) {
+	adaptor := &Adaptor{}
+	system := []map[string]any{
+		{"type": "text", "text": "global instruction"},
+	}
+	messages := []dto.ClaudeMessage{
+		{Role: "user", Content: "question"},
+		{Role: "system", Content: "mid-conversation instruction"},
+	}
+	request := &dto.ClaudeRequest{
+		Model:    "anthropic/claude-opus-5",
+		System:   system,
+		Messages: messages,
+	}
+
+	converted, err := adaptor.ConvertClaudeRequest(nil, cloudflareRelayInfo(dto.CloudflareAPIModeBYOK), request)
+
+	require.NoError(t, err)
+	assert.Same(t, request, converted)
+	assert.Equal(t, "claude-opus-5", request.Model)
+	assert.Equal(t, system, request.System)
+	assert.Equal(t, messages, request.Messages)
+}
+
+func TestConvertClaudeRequestRejectsUnrepresentableRESTSystemBlock(t *testing.T) {
+	adaptor := &Adaptor{}
+	request := &dto.ClaudeRequest{
+		Model: "claude-opus-5",
+		System: []map[string]any{
+			{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/image.png"}},
+		},
+	}
+
+	converted, err := adaptor.ConvertClaudeRequest(nil, cloudflareRelayInfo(dto.CloudflareAPIModeREST), request)
+
+	require.Error(t, err)
+	assert.Nil(t, converted)
+	var newAPIError *types.NewAPIError
+	require.ErrorAs(t, err, &newAPIError)
+	assert.Equal(t, http.StatusBadRequest, newAPIError.StatusCode)
+	assert.Contains(t, err.Error(), "system")
+}
+
 func TestConvertOpenAIRequestPreservesProviderPrefixInCompatMode(t *testing.T) {
 	adaptor := &Adaptor{}
 
