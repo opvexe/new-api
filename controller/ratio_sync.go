@@ -3,7 +3,6 @@ package controller
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,8 +19,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/samber/lo"
@@ -84,37 +83,6 @@ var numericPricingSyncFields = map[string]bool{
 	"audio_ratio":            true,
 	"audio_completion_ratio": true,
 	"model_price":            true,
-}
-
-//go:embed ratio_config-v1-base.json
-var officialRatioPresetFallback []byte
-
-func parseOfficialRatioPreset(data []byte) (map[string]any, error) {
-	var body struct {
-		Success bool            `json:"success"`
-		Data    json.RawMessage `json:"data"`
-		Message string          `json:"message"`
-	}
-	if err := common.DecodeJson(bytes.NewReader(data), &body); err != nil {
-		return nil, fmt.Errorf("decode ratio preset: %w", err)
-	}
-	if !body.Success {
-		if body.Message == "" {
-			body.Message = "upstream returned success=false"
-		}
-		return nil, fmt.Errorf("invalid ratio preset: %s", body.Message)
-	}
-
-	var ratioData map[string]any
-	if err := common.Unmarshal(body.Data, &ratioData); err != nil {
-		return nil, fmt.Errorf("decode ratio preset data: %w", err)
-	}
-	for _, field := range pricingSyncFields {
-		if _, ok := ratioData[field]; ok {
-			return ratioData, nil
-		}
-	}
-	return nil, fmt.Errorf("ratio preset contains no supported pricing fields")
 }
 
 type upstreamResult struct {
@@ -322,49 +290,27 @@ func FetchUpstreamRatios(c *gin.Context) {
 				}
 				time.Sleep(time.Duration(200*(1<<attempt)) * time.Millisecond)
 			}
-			isOfficialRatioPreset := chItem.ID == officialRatioPresetID
-			var bodyBytes []byte
-			fetchErr := lastErr
-			if fetchErr == nil {
-				if resp.StatusCode != http.StatusOK {
-					fetchErr = fmt.Errorf("unexpected HTTP status: %s", resp.Status)
-				} else {
-					if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(strings.ToLower(ct), "application/json") {
-						logger.LogWarn(c.Request.Context(), "unexpected content-type from "+chItem.Name+": "+ct)
-					}
-					bodyBytes, fetchErr = io.ReadAll(io.LimitReader(resp.Body, maxRatioConfigBytes+1))
-					if fetchErr == nil && len(bodyBytes) > maxRatioConfigBytes {
-						fetchErr = fmt.Errorf("response exceeds %d bytes", maxRatioConfigBytes)
-					}
-				}
+			if lastErr != nil {
+				logger.LogWarn(c.Request.Context(), "http error on "+chItem.Name+": "+lastErr.Error())
+				ch <- upstreamResult{Name: uniqueName, Err: lastErr.Error()}
+				return
 			}
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				logger.LogWarn(c.Request.Context(), "non-200 from "+chItem.Name+": "+resp.Status)
+				ch <- upstreamResult{Name: uniqueName, Err: resp.Status}
+				return
 			}
 
-			if fetchErr != nil {
-				if !isOfficialRatioPreset {
-					logger.LogWarn(c.Request.Context(), "fetch failed from "+chItem.Name+": "+fetchErr.Error())
-					ch <- upstreamResult{Name: uniqueName, Err: fetchErr.Error()}
-					return
-				}
-
-				bodyBytes = officialRatioPresetFallback
-				logger.LogWarn(c.Request.Context(), "remote ratio preset unavailable, using embedded fallback: "+fetchErr.Error())
+			// Content-Type 和响应体大小校验
+			if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(strings.ToLower(ct), "application/json") {
+				logger.LogWarn(c.Request.Context(), "unexpected content-type from "+chItem.Name+": "+ct)
 			}
-
-			if isOfficialRatioPreset {
-				ratioData, parseErr := parseOfficialRatioPreset(bodyBytes)
-				if parseErr != nil && fetchErr == nil {
-					logger.LogWarn(c.Request.Context(), "remote ratio preset invalid, using embedded fallback: "+parseErr.Error())
-					ratioData, parseErr = parseOfficialRatioPreset(officialRatioPresetFallback)
-				}
-				if parseErr != nil {
-					logger.LogWarn(c.Request.Context(), "embedded ratio preset invalid: "+parseErr.Error())
-					ch <- upstreamResult{Name: uniqueName, Err: parseErr.Error()}
-					return
-				}
-				ch <- upstreamResult{Name: uniqueName, Data: ratioData}
+			limited := io.LimitReader(resp.Body, maxRatioConfigBytes)
+			bodyBytes, err := io.ReadAll(limited)
+			if err != nil {
+				logger.LogWarn(c.Request.Context(), "read response failed from "+chItem.Name+": "+err.Error())
+				ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
 				return
 			}
 
