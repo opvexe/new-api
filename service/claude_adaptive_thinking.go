@@ -12,6 +12,8 @@ func IsClaudeAdaptiveThinkingModel(model string) bool {
 	return model == "claude-fable-5" || model == "claude-opus-5"
 }
 
+// ApplyClaudeAdaptiveThinkingJSON is retained for callers that explicitly opt
+// into adaptive thinking. Relay paths do not apply it automatically.
 func ApplyClaudeAdaptiveThinkingJSON(rawJSON []byte, model string) []byte {
 	if !IsClaudeAdaptiveThinkingModel(model) {
 		return rawJSON

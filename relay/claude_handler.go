@@ -19,7 +19,6 @@ import (
 	"github.com/QuantumNous/new-api/setting/reasoning"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
@@ -108,8 +107,6 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		info.UpstreamModelName = request.Model
 	}
 
-	forceClaudeAdaptiveThinking := applyClaudeAdaptiveThinking(request, info.OriginModelName)
-
 	if info.ChannelSetting.SystemPrompt != "" {
 		if request.System == nil {
 			request.SetStringSystem(info.ChannelSetting.SystemPrompt)
@@ -162,17 +159,8 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		rawBody, err := storage.Bytes()
-		if err != nil {
-			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
-		}
-		body, size, closer, err := relaycommon.NewOutboundJSONBody(service.ApplyClaudeAdaptiveThinkingJSON(rawBody, info.OriginModelName))
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-		}
-		defer closer.Close()
-		info.UpstreamRequestBodySize = size
-		requestBody = body
+		info.UpstreamRequestBodySize = storage.Size()
+		requestBody = common.ReaderOnly(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertClaudeRequest(c, info, request)
 		if err != nil {
@@ -183,8 +171,6 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
-		isClaudeRequestBody := forceClaudeAdaptiveThinking && gjson.GetBytes(jsonData, "thinking").Exists()
-
 		// remove disabled fields for Claude API
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
@@ -197,10 +183,6 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
-		}
-
-		if isClaudeRequestBody {
-			jsonData = service.ApplyClaudeAdaptiveThinkingJSON(jsonData, info.OriginModelName)
 		}
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)
@@ -243,6 +225,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	return nil
 }
 
+// applyClaudeAdaptiveThinking is retained for explicit opt-in use. Relay
+// requests intentionally do not call it so client thinking parameters pass
+// through unchanged.
 func applyClaudeAdaptiveThinking(request *dto.ClaudeRequest, originModel string) bool {
 	if request == nil || !service.IsClaudeAdaptiveThinkingModel(originModel) {
 		return false

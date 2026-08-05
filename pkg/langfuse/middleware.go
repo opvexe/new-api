@@ -11,7 +11,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -51,10 +50,7 @@ func Middleware(client *Client) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		input := service.ApplyClaudeAdaptiveThinkingJSON(
-			append([]byte(nil), requestBody...),
-			request.Model,
-		)
+		input := append([]byte(nil), requestBody...)
 
 		writer := &captureWriter{ResponseWriter: c.Writer}
 		c.Writer = writer
@@ -94,9 +90,6 @@ func Middleware(client *Client) gin.HandlerFunc {
 		metadata := make(map[string]any)
 		modelParameters := make(map[string]any)
 		thinkingEffort := request.GetEfforts()
-		if service.IsClaudeAdaptiveThinkingModel(request.Model) {
-			thinkingEffort = "max"
-		}
 		if thinkingEffort != "" {
 			metadata["thinking_effort"] = thinkingEffort
 			modelParameters["thinking_effort"] = thinkingEffort
