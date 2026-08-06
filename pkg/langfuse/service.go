@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/google/uuid"
 )
 
@@ -45,6 +46,9 @@ type GenerationRequest struct {
 	UserName        string
 	ApiKeyID        string
 	ApiKeyName      string
+	ChannelID       int
+	ChannelName     string
+	ChannelType     int
 	Route           string
 	SessionID       string
 	ModelParameters map[string]any
@@ -189,6 +193,9 @@ func (c *Client) TraceGeneration(request GenerationRequest) {
 	metadata["request_id"] = traceID
 	metadata["apikey_name"] = request.ApiKeyName
 	metadata["api_key_id"] = request.ApiKeyID
+	metadata["channel"] = request.ChannelName
+	metadata["channel_id"] = request.ChannelID
+	metadata["channel_type"] = constant.GetChannelTypeName(request.ChannelType)
 	trace := traceBody{
 		ID:          traceID,
 		Timestamp:   request.StartTime,
