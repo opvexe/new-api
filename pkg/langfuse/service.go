@@ -49,6 +49,7 @@ type GenerationRequest struct {
 	ChannelID       int
 	ChannelName     string
 	ChannelType     int
+	SiteTag         string
 	Route           string
 	SessionID       string
 	ModelParameters map[string]any
@@ -196,6 +197,9 @@ func (c *Client) TraceGeneration(request GenerationRequest) {
 	metadata["channel"] = request.ChannelName
 	metadata["channel_id"] = request.ChannelID
 	metadata["channel_type"] = constant.GetChannelTypeName(request.ChannelType)
+	if request.SiteTag != "" {
+		metadata["site"] = request.SiteTag
+	}
 	trace := traceBody{
 		ID:          traceID,
 		Timestamp:   request.StartTime,

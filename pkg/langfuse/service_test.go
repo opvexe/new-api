@@ -35,3 +35,26 @@ func TestTraceGenerationIncludesChannelMetadata(t *testing.T) {
 	assert.Equal(t, float64(3), trace.Metadata["channel_id"])
 	assert.Equal(t, "Cloudflare", trace.Metadata["channel_type"])
 }
+
+func TestTraceGenerationIncludesSiteMetadata(t *testing.T) {
+	client := &Client{
+		environment: "test",
+		eventCh:     make(chan event, 1),
+		stopCh:      make(chan struct{}),
+	}
+	startedAt := time.Now()
+	client.TraceGeneration(GenerationRequest{
+		TraceID:   "trace-site-tag",
+		Name:      "anthropic-messages",
+		StartTime: startedAt,
+		EndTime:   startedAt.Add(time.Second),
+		UserName:  "alice",
+		SiteTag:   "baidu",
+	})
+
+	item := <-client.eventCh
+	var trace traceBody
+	require.NoError(t, common.Unmarshal(item.Body, &trace))
+	assert.Equal(t, "baidu", trace.Metadata["site"])
+	assert.Equal(t, []string{"user:alice"}, trace.Tags)
+}

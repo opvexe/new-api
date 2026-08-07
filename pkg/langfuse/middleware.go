@@ -3,7 +3,9 @@ package langfuse
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +13,9 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/publicsuffix"
 )
 
 type captureWriter struct {
@@ -110,12 +114,43 @@ func Middleware(client *Client) gin.HandlerFunc {
 			ChannelID:       common.GetContextKeyInt(c, constant.ContextKeyChannelId),
 			ChannelName:     common.GetContextKeyString(c, constant.ContextKeyChannelName),
 			ChannelType:     common.GetContextKeyInt(c, constant.ContextKeyChannelType),
+			SiteTag:         siteTag(system_setting.ServerAddress, c.Request.Host),
 			Route:           c.Request.Method + " " + c.Request.URL.Path,
 			SessionID:       sessionID(request.Metadata),
 			ModelParameters: modelParameters,
 			Metadata:        metadata,
 		})
 	}
+}
+
+func siteTag(serverAddress string, requestHost string) string {
+	parsed, err := url.Parse(strings.TrimSpace(serverAddress))
+	if err == nil {
+		if tag := siteTagFromHost(parsed.Host); tag != "" {
+			return tag
+		}
+	}
+	return siteTagFromHost(requestHost)
+}
+
+func siteTagFromHost(hostPort string) string {
+	parsed, err := url.Parse("//" + strings.TrimSpace(hostPort))
+	if err != nil {
+		return ""
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "" || net.ParseIP(host) != nil {
+		return ""
+	}
+	registeredDomain, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return ""
+	}
+	siteTag, _, ok := strings.Cut(registeredDomain, ".")
+	if !ok {
+		return ""
+	}
+	return siteTag
 }
 
 func usageFromResponse(body []byte, stream bool) *Usage {
