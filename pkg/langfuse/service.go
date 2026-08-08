@@ -23,7 +23,11 @@ const (
 
 	defaultQueueSize = 1000
 	maxBatchSize     = 50
-	flushInterval    = time.Second
+	// A trace event carries the full request and response payload, so batches
+	// are bounded by bytes as well as by count: the ingestion endpoint rejects
+	// oversized request bodies, and a rejection loses every event in the batch.
+	maxBatchBytes = 1 << 20
+	flushInterval = time.Second
 	// Batches are handed to a small pool of senders so that one slow ingestion
 	// round trip does not stop the worker from draining the event queue.
 	senderCount      = 4
@@ -269,20 +273,28 @@ func (c *Client) run() {
 	dropTicker := time.NewTicker(dropReportPeriod)
 	defer dropTicker.Stop()
 	batch := make([]event, 0, maxBatchSize)
+	batchBytes := 0
 	for {
 		select {
 		case <-c.stopCh:
-			c.drain(batch)
+			c.drain(batch, batchBytes)
 			close(c.sendCh)
 			c.senders.Wait()
 			return
 		case item := <-c.eventCh:
+			// Flush before appending so an event larger than the byte budget
+			// forms a batch of its own instead of dragging others into a
+			// request that the ingestion endpoint would reject outright.
+			if len(batch) > 0 && batchBytes+len(item.Body) > maxBatchBytes {
+				batch, batchBytes = c.dispatch(batch), 0
+			}
 			batch = append(batch, item)
+			batchBytes += len(item.Body)
 			if len(batch) >= maxBatchSize {
-				batch = c.dispatch(batch)
+				batch, batchBytes = c.dispatch(batch), 0
 			}
 		case <-flushTicker.C:
-			batch = c.dispatch(batch)
+			batch, batchBytes = c.dispatch(batch), 0
 		case <-dropTicker.C:
 			if dropped := c.dropped.Swap(0); dropped > 0 {
 				common.SysError(fmt.Sprintf("langfuse dropped %d events because the queue was full or ingestion failed", dropped))
@@ -305,16 +317,21 @@ func (c *Client) dispatch(batch []event) []event {
 	return make([]event, 0, maxBatchSize)
 }
 
-func (c *Client) drain(batch []event) {
+func (c *Client) drain(batch []event, batchBytes int) {
 	ctx, cancel := context.WithTimeout(c.force, shutdownTimeout)
 	defer cancel()
 	for {
 		select {
 		case item := <-c.eventCh:
+			if len(batch) > 0 && batchBytes+len(item.Body) > maxBatchBytes {
+				c.send(ctx, batch)
+				batch, batchBytes = batch[:0], 0
+			}
 			batch = append(batch, item)
+			batchBytes += len(item.Body)
 			if len(batch) >= maxBatchSize {
 				c.send(ctx, batch)
-				batch = batch[:0]
+				batch, batchBytes = batch[:0], 0
 			}
 		default:
 			c.send(ctx, batch)
