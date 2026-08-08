@@ -21,8 +21,14 @@ import (
 const (
 	EventTypeTraceCreate = "trace-create"
 
-	defaultQueueSize = 10
-	httpTimeout      = 90 * time.Second
+	defaultQueueSize = 1000
+	maxBatchSize     = 50
+	flushInterval    = time.Second
+	// Batches are handed to a small pool of senders so that one slow ingestion
+	// round trip does not stop the worker from draining the event queue.
+	senderCount      = 4
+	senderQueueDepth = 8
+	httpTimeout      = 10 * time.Second
 	shutdownTimeout  = 3 * time.Second
 	dropReportPeriod = 30 * time.Second
 )
@@ -91,6 +97,8 @@ type Client struct {
 	httpClient  *http.Client
 
 	eventCh chan event
+	sendCh  chan []event
+	senders sync.WaitGroup
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	force   context.Context
@@ -118,6 +126,7 @@ func NewClient(config Config) (*Client, error) {
 		environment: config.Environment,
 		httpClient:  &http.Client{Timeout: httpTimeout},
 		eventCh:     make(chan event, queueSize),
+		sendCh:      make(chan []event, senderQueueDepth),
 		stopCh:      make(chan struct{}),
 		doneCh:      make(chan struct{}),
 		force:       force,
@@ -215,7 +224,6 @@ func (c *Client) TraceGeneration(request GenerationRequest) {
 		trace.Tags = []string{"user:" + request.UserName}
 	}
 	c.enqueue(EventTypeTraceCreate, request.StartTime, trace)
-	common.SysLog(fmt.Sprintf("langfuse trace created: trace_id=%s name=%s model=%s user_id=%s session_id=%s route=%s latency_ms=%d", traceID, request.Name, request.Model, request.UserID, request.SessionID, request.Route, latency))
 }
 
 func (c *Client) enqueue(eventType string, timestamp time.Time, body any) {
@@ -236,24 +244,45 @@ func (c *Client) enqueue(eventType string, timestamp time.Time, body any) {
 		return
 	default:
 	}
+	// Tracing must never slow down the relay request: drop instead of blocking
+	// the caller when the ingestion worker cannot keep up.
 	select {
-	case <-c.stopCh:
-		c.dropped.Add(1)
 	case c.eventCh <- item:
+	default:
+		c.dropped.Add(1)
 	}
 }
 
 func (c *Client) run() {
 	defer close(c.doneCh)
+	for i := 0; i < senderCount; i++ {
+		c.senders.Add(1)
+		go func() {
+			defer c.senders.Done()
+			for batch := range c.sendCh {
+				c.send(c.force, batch)
+			}
+		}()
+	}
+	flushTicker := time.NewTicker(flushInterval)
+	defer flushTicker.Stop()
 	dropTicker := time.NewTicker(dropReportPeriod)
 	defer dropTicker.Stop()
+	batch := make([]event, 0, maxBatchSize)
 	for {
 		select {
 		case <-c.stopCh:
-			c.drain()
+			c.drain(batch)
+			close(c.sendCh)
+			c.senders.Wait()
 			return
 		case item := <-c.eventCh:
-			c.send(c.force, []event{item})
+			batch = append(batch, item)
+			if len(batch) >= maxBatchSize {
+				batch = c.dispatch(batch)
+			}
+		case <-flushTicker.C:
+			batch = c.dispatch(batch)
 		case <-dropTicker.C:
 			if dropped := c.dropped.Swap(0); dropped > 0 {
 				common.SysError(fmt.Sprintf("langfuse dropped %d events because the queue was full or ingestion failed", dropped))
@@ -261,14 +290,34 @@ func (c *Client) run() {
 		}
 	}
 }
-func (c *Client) drain() {
+
+// dispatch hands the batch to a sender and returns a fresh batch buffer. The
+// sender owns the slice from here on, so it cannot be truncated and reused.
+func (c *Client) dispatch(batch []event) []event {
+	if len(batch) == 0 {
+		return batch
+	}
+	select {
+	case c.sendCh <- batch:
+	default:
+		c.dropped.Add(uint64(len(batch)))
+	}
+	return make([]event, 0, maxBatchSize)
+}
+
+func (c *Client) drain(batch []event) {
 	ctx, cancel := context.WithTimeout(c.force, shutdownTimeout)
 	defer cancel()
 	for {
 		select {
 		case item := <-c.eventCh:
-			c.send(ctx, []event{item})
+			batch = append(batch, item)
+			if len(batch) >= maxBatchSize {
+				c.send(ctx, batch)
+				batch = batch[:0]
+			}
 		default:
+			c.send(ctx, batch)
 			return
 		}
 	}
