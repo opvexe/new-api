@@ -95,10 +95,13 @@ type batchRequest struct {
 }
 
 type Client struct {
-	endpoint    string
-	authHeader  string
 	environment string
-	httpClient  *http.Client
+	sink        eventSink
+	// batchSize bounds how many events one deliver call carries. Both sinks want
+	// the same bound for different reasons: the ingestion endpoint rejects
+	// oversized request bodies, and nsqd rejects an MPUB over its max-body-size.
+	batchSize  int
+	batchBytes int
 
 	eventCh chan event
 	sendCh  chan []event
@@ -123,12 +126,24 @@ func NewClient(config Config) (*Client, error) {
 	if queueSize <= 0 {
 		queueSize = defaultQueueSize
 	}
+	sink, batchSize, batchBytes := eventSink(newIngester(config.Endpoint, config.PublicKey, config.SecretKey)), maxBatchSize, maxBatchBytes
+	if config.NSQDAddress != "" {
+		producer, err := newNSQSink(config.NSQDAddress, config.NSQTopic)
+		if err != nil {
+			return nil, err
+		}
+		// Batching stays as it is for the direct sink. It does not change what
+		// the consumer reads back — nsqSink still marshals one message per event
+		// — it only lets those messages ship in a single MPUB, which is what
+		// keeps the producer from being capped by per-message round trips.
+		sink = producer
+	}
 	force, cancel := context.WithCancel(context.Background())
 	return &Client{
-		endpoint:    strings.TrimRight(config.Endpoint, "/"),
-		authHeader:  "Basic " + base64.StdEncoding.EncodeToString([]byte(config.PublicKey+":"+config.SecretKey)),
 		environment: config.Environment,
-		httpClient:  &http.Client{Timeout: httpTimeout},
+		sink:        sink,
+		batchSize:   batchSize,
+		batchBytes:  batchBytes,
 		eventCh:     make(chan event, queueSize),
 		sendCh:      make(chan []event, senderQueueDepth),
 		stopCh:      make(chan struct{}),
@@ -146,6 +161,8 @@ func NewClientFromEnv() (*Client, error) {
 		SecretKey:    common.GetEnvOrDefaultString("LANGFUSE_SECRET_KEY", ""),
 		MaxQueueSize: common.GetEnvOrDefault("LANGFUSE_MAX_QUEUE_SIZE", defaultQueueSize),
 		Environment:  common.GetEnvOrDefaultString("LANGFUSE_ENVIRONMENT", "production"),
+		NSQDAddress:  common.GetEnvOrDefaultString("LANGFUSE_NSQD_ADDRESS", ""),
+		NSQTopic:     common.GetEnvOrDefaultString("LANGFUSE_NSQ_TOPIC", defaultNSQTopic),
 	}
 	client, err := NewClient(config)
 	if err != nil {
@@ -155,7 +172,11 @@ func NewClientFromEnv() (*Client, error) {
 		common.SysLog("langfuse tracing is disabled")
 		return nil, nil
 	}
-	common.SysLog(fmt.Sprintf("langfuse tracing enabled: endpoint=%s environment=%s", client.endpoint, client.environment))
+	transport := "direct"
+	if config.NSQDAddress != "" {
+		transport = fmt.Sprintf("nsq(%s topic=%s)", config.NSQDAddress, config.NSQTopic)
+	}
+	common.SysLog(fmt.Sprintf("langfuse tracing enabled: endpoint=%s environment=%s transport=%s", config.Endpoint, config.Environment, transport))
 	return client, nil
 }
 
@@ -272,7 +293,7 @@ func (c *Client) run() {
 	defer flushTicker.Stop()
 	dropTicker := time.NewTicker(dropReportPeriod)
 	defer dropTicker.Stop()
-	batch := make([]event, 0, maxBatchSize)
+	batch := make([]event, 0, c.batchSize)
 	batchBytes := 0
 	for {
 		select {
@@ -280,17 +301,18 @@ func (c *Client) run() {
 			c.drain(batch, batchBytes)
 			close(c.sendCh)
 			c.senders.Wait()
+			c.sink.Close()
 			return
 		case item := <-c.eventCh:
 			// Flush before appending so an event larger than the byte budget
 			// forms a batch of its own instead of dragging others into a
 			// request that the ingestion endpoint would reject outright.
-			if len(batch) > 0 && batchBytes+len(item.Body) > maxBatchBytes {
+			if c.batchBytes > 0 && len(batch) > 0 && batchBytes+len(item.Body) > c.batchBytes {
 				batch, batchBytes = c.dispatch(batch), 0
 			}
 			batch = append(batch, item)
 			batchBytes += len(item.Body)
-			if len(batch) >= maxBatchSize {
+			if len(batch) >= c.batchSize {
 				batch, batchBytes = c.dispatch(batch), 0
 			}
 		case <-flushTicker.C:
@@ -305,16 +327,24 @@ func (c *Client) run() {
 
 // dispatch hands the batch to a sender and returns a fresh batch buffer. The
 // sender owns the slice from here on, so it cannot be truncated and reused.
+//
+// Waiting here is deliberate. dispatch runs on the worker goroutine, never on a
+// relay request, so blocking costs nothing user-visible; it simply stops the
+// worker from draining eventCh, which is the buffer sized to absorb bursts.
+// Dropping instead would cap the effective queue at the handoff depth and throw
+// away events the 1000-deep queue exists to protect. enqueue stays the single
+// place where events are dropped.
 func (c *Client) dispatch(batch []event) []event {
 	if len(batch) == 0 {
 		return batch
 	}
-	select {
-	case c.sendCh <- batch:
-	default:
-		c.dropped.Add(uint64(len(batch)))
-	}
-	return make([]event, 0, maxBatchSize)
+	// A plain blocking handoff cannot deadlock: the worker is the only writer to
+	// sendCh and closes it itself, after drain, so the senders are still
+	// consuming for as long as this can block. Selecting on stopCh here instead
+	// would abandon batches during shutdown, because a closed stopCh makes both
+	// cases ready and select picks between them at random.
+	c.sendCh <- batch
+	return make([]event, 0, c.batchSize)
 }
 
 func (c *Client) drain(batch []event, batchBytes int) {
@@ -323,13 +353,13 @@ func (c *Client) drain(batch []event, batchBytes int) {
 	for {
 		select {
 		case item := <-c.eventCh:
-			if len(batch) > 0 && batchBytes+len(item.Body) > maxBatchBytes {
+			if c.batchBytes > 0 && len(batch) > 0 && batchBytes+len(item.Body) > c.batchBytes {
 				c.send(ctx, batch)
 				batch, batchBytes = batch[:0], 0
 			}
 			batch = append(batch, item)
 			batchBytes += len(item.Body)
-			if len(batch) >= maxBatchSize {
+			if len(batch) >= c.batchSize {
 				c.send(ctx, batch)
 				batch, batchBytes = batch[:0], 0
 			}
@@ -344,37 +374,65 @@ func (c *Client) send(parent context.Context, events []event) {
 	if len(events) == 0 {
 		return
 	}
+	if err := c.sink.deliver(parent, events); err != nil {
+		c.dropped.Add(uint64(len(events)))
+		common.SysError("failed to deliver langfuse events: " + err.Error())
+	}
+}
+
+// eventSink is the producer's next hop: either Langfuse itself or the NSQ
+// buffer in front of it.
+type eventSink interface {
+	deliver(ctx context.Context, events []event) error
+	Close()
+}
+
+// ingester posts events to the Langfuse ingestion endpoint. The producer uses
+// it when NSQ is not configured, and the NSQ consumer always uses it.
+type ingester struct {
+	endpoint   string
+	authHeader string
+	httpClient *http.Client
+}
+
+func newIngester(endpoint, publicKey, secretKey string) *ingester {
+	return &ingester{
+		endpoint:   strings.TrimRight(endpoint, "/"),
+		authHeader: "Basic " + base64.StdEncoding.EncodeToString([]byte(publicKey+":"+secretKey)),
+		httpClient: &http.Client{Timeout: httpTimeout},
+	}
+}
+
+func (i *ingester) Close() {}
+
+func (i *ingester) deliver(parent context.Context, events []event) error {
+	if len(events) == 0 {
+		return nil
+	}
 	requestBody := batchRequest{Batch: events}
 	requestBody.Metadata.SDKName = "new-api-go"
 	requestBody.Metadata.SDKVersion = "1.0.0"
 	body, err := common.Marshal(requestBody)
 	if err != nil {
-		c.dropped.Add(uint64(len(events)))
-		common.SysError("failed to marshal langfuse batch: " + err.Error())
-		return
+		return fmt.Errorf("marshal langfuse batch: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(parent, httpTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/api/public/ingestion", bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, i.endpoint+"/api/public/ingestion", bytes.NewReader(body))
 	if err != nil {
-		c.dropped.Add(uint64(len(events)))
-		common.SysError("failed to create langfuse request: " + err.Error())
-		return
+		return fmt.Errorf("create langfuse request: %w", err)
 	}
-	request.Header.Set("Authorization", c.authHeader)
+	request.Header.Set("Authorization", i.authHeader)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := c.httpClient.Do(request)
+	response, err := i.httpClient.Do(request)
 	if err != nil {
-		c.dropped.Add(uint64(len(events)))
-		common.SysError("failed to send langfuse batch: " + err.Error())
-		return
+		return fmt.Errorf("send langfuse batch: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusMultipleChoices {
 		common.SysLog(fmt.Sprintf("langfuse ingestion succeeded: status=%d events=%d", response.StatusCode, len(events)))
-		return
+		return nil
 	}
 	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
-	c.dropped.Add(uint64(len(events)))
-	common.SysError(fmt.Sprintf("langfuse ingestion failed: status=%d body=%s", response.StatusCode, responseBody))
+	return fmt.Errorf("langfuse ingestion failed: status=%d body=%s", response.StatusCode, responseBody)
 }

@@ -203,6 +203,18 @@ func main() {
 		langfuseClient.Start()
 		defer langfuseClient.Stop()
 	}
+	langfuseConsumer, err := langfuse.NewConsumerFromEnv()
+	if err != nil {
+		common.FatalLog("failed to initialize langfuse nsq consumer: " + err.Error())
+		return
+	}
+	if langfuseConsumer != nil {
+		if err := langfuseConsumer.Start(); err != nil {
+			common.FatalLog("failed to start langfuse nsq consumer: " + err.Error())
+			return
+		}
+		defer langfuseConsumer.Stop()
+	}
 
 	// 设置路由
 	router.SetRouter(server, router.WebAssets{
