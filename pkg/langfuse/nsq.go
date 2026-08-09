@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/bytemind-io/nsqcc"
-	"github.com/bytemind-io/nsqcc/filepath/ifs"
-	"github.com/bytemind-io/nsqcc/in"
+	"github.com/QuantumNous/new-api/pkg/nsqcc"
+	"github.com/QuantumNous/new-api/pkg/nsqcc/filepath/ifs"
+	"github.com/QuantumNous/new-api/pkg/nsqcc/in"
 	"github.com/nsqio/go-nsq"
 )
 

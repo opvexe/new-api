@@ -776,8 +776,6 @@ github.com/bytedance/sonic v1.14.1 h1:FBMC0zVz5XUmE4z9wF4Jey0An5FueFvOsTKKKtwIl7
 github.com/bytedance/sonic v1.14.1/go.mod h1:gi6uhQLMbTdeP0muCnrjHLeCUPyb70ujhnNlhOylAFc=
 github.com/bytedance/sonic/loader v0.3.0 h1:dskwH8edlzNMctoruo8FPTJDF3vLtDT0sXZwvZJyqeA=
 github.com/bytedance/sonic/loader v0.3.0/go.mod h1:N8A3vUdtUebEY2/VQC0MyhYeKUFosQU6FxH2JmUe6VI=
-github.com/bytemind-io/nsqcc v0.0.0-20241120060657-01be191eb83b h1:kpdW3f2f9BlViHkVGu4egiFFgSjyEUplkasl8kJa9mg=
-github.com/bytemind-io/nsqcc v0.0.0-20241120060657-01be191eb83b/go.mod h1:dSvYsVep29xlp56jwZGMsAhxKeT8mVHPkQMZe0K/nFw=
 github.com/casbin/casbin/v2 v2.135.0 h1:6BLkMQiGotYyS5yYeWgW19vxqugUlvHFkFiLnLR/bxk=
 github.com/casbin/casbin/v2 v2.135.0/go.mod h1:FmcfntdXLTcYXv/hxgNntcRPqAbwOG9xsism0yXT+18=
 github.com/casbin/govaluate v1.3.0/go.mod h1:G/UnbIjZk/0uMNaLwZZmFQrR72tYRZWQkO70si/iR7A=
