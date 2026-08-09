@@ -32,12 +32,10 @@ const (
 	nsqConsumerUserAgent     = "new-api-langfuse-consumer/1.0"
 	nsqReconnectReportPeriod = time.Minute
 
-	// One MPUB command must fit inside nsqd's --max-body-size, which defaults to
-	// 5 MB. Exceeding it makes nsqd drop the connection instead of rejecting a
-	// single event, so the batch is capped well below that on both count and
-	// bytes. An event larger than the byte cap still ships on its own.
+	// Matches nsqd's --max-msg-size, and must stay under its --max-body-size
+	// (8 MB) or nsqd drops the connection instead of rejecting one event.
 	nsqPublishBatchMessages = 50
-	nsqPublishBatchBytes    = 1 << 20
+	nsqPublishBatchBytes    = 4718000
 
 	nsqDialTimeout  = 5 * time.Second
 	nsqWriteTimeout = 5 * time.Second
