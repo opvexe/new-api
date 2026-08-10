@@ -32,7 +32,7 @@ const (
 	// round trip does not stop the worker from draining the event queue.
 	senderCount      = 4
 	senderQueueDepth = 8
-	httpTimeout      = 10 * time.Second
+	httpTimeout      = 60 * time.Second
 	shutdownTimeout  = 3 * time.Second
 	dropReportPeriod = 30 * time.Second
 )
