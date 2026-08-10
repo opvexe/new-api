@@ -37,6 +37,23 @@ const (
 	dropReportPeriod = 30 * time.Second
 )
 
+// logEnabled gates every line this package writes. Tracing runs at request
+// rate, so the success path alone is thousands of lines an hour, and the
+// startup lines carry the ingestion endpoint and the NSQ addresses.
+var logEnabled = false
+
+func logInfo(message string) {
+	if logEnabled {
+		common.SysLog(message)
+	}
+}
+
+func logError(message string) {
+	if logEnabled {
+		common.SysError(message)
+	}
+}
+
 type Usage struct {
 	Input  int64 `json:"input,omitempty"`
 	Output int64 `json:"output,omitempty"`
@@ -154,6 +171,7 @@ func NewClient(config Config) (*Client, error) {
 }
 
 func NewClientFromEnv() (*Client, error) {
+	logEnabled = common.GetEnvOrDefaultBool("LANGFUSE_LOG_ENABLED", false)
 	config := Config{
 		Enabled:      common.GetEnvOrDefaultBool("LANGFUSE_ENABLED", false),
 		Endpoint:     common.GetEnvOrDefaultString("LANGFUSE_ENDPOINT", "https://cloud.langfuse.com"),
@@ -169,14 +187,14 @@ func NewClientFromEnv() (*Client, error) {
 		return nil, err
 	}
 	if client == nil {
-		common.SysLog("langfuse tracing is disabled")
+		logInfo("langfuse tracing is disabled")
 		return nil, nil
 	}
 	transport := "direct"
 	if config.NSQDAddress != "" {
 		transport = fmt.Sprintf("nsq(%s topic=%s)", config.NSQDAddress, config.NSQTopic)
 	}
-	common.SysLog(fmt.Sprintf("langfuse tracing enabled: endpoint=%s environment=%s transport=%s", config.Endpoint, config.Environment, transport))
+	logInfo(fmt.Sprintf("langfuse tracing enabled: endpoint=%s environment=%s transport=%s", config.Endpoint, config.Environment, transport))
 	return client, nil
 }
 
@@ -254,7 +272,7 @@ func (c *Client) TraceGeneration(request GenerationRequest) {
 func (c *Client) enqueue(eventType string, timestamp time.Time, body any) {
 	bodyData, err := common.Marshal(body)
 	if err != nil {
-		common.SysError("failed to marshal langfuse event: " + err.Error())
+		logError("failed to marshal langfuse event: " + err.Error())
 		return
 	}
 	item := event{
@@ -319,7 +337,7 @@ func (c *Client) run() {
 			batch, batchBytes = c.dispatch(batch), 0
 		case <-dropTicker.C:
 			if dropped := c.dropped.Swap(0); dropped > 0 {
-				common.SysError(fmt.Sprintf("langfuse dropped %d events because the queue was full or ingestion failed", dropped))
+				logError(fmt.Sprintf("langfuse dropped %d events because the queue was full or ingestion failed", dropped))
 			}
 		}
 	}
@@ -376,7 +394,7 @@ func (c *Client) send(parent context.Context, events []event) {
 	}
 	if err := c.sink.deliver(parent, events); err != nil {
 		c.dropped.Add(uint64(len(events)))
-		common.SysError("failed to deliver langfuse events: " + err.Error())
+		logError("failed to deliver langfuse events: " + err.Error())
 	}
 }
 
@@ -430,7 +448,7 @@ func (i *ingester) deliver(parent context.Context, events []event) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusMultipleChoices {
-		common.SysLog(fmt.Sprintf("langfuse ingestion succeeded: status=%d events=%d", response.StatusCode, len(events)))
+		logInfo(fmt.Sprintf("langfuse ingestion succeeded: status=%d events=%d", response.StatusCode, len(events)))
 		return nil
 	}
 	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4*1024))
