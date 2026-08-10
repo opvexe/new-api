@@ -12,6 +12,7 @@ permissions:
 
 env:
   IMAGE_VERSION_PREFIX: v1.0.0-rc
+  SHORT_SHA: rc.24
 
 jobs:
   build:
@@ -24,7 +25,6 @@ jobs:
       - name: Prepare image version
         id: version
         run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
           IMAGE_VERSION="${IMAGE_VERSION_PREFIX}.${SHORT_SHA}"
           echo "tag=${IMAGE_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "${IMAGE_VERSION}" > VERSION
