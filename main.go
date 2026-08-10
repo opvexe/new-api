@@ -194,22 +194,16 @@ func main() {
 	middleware.SetUpLogger(server)
 	InjectUmamiAnalytics()
 	InjectGoogleAnalytics()
-	langfuseClient, err := langfuse.NewClientFromEnv()
-	if err != nil {
-		common.SysError("langfuse tracing disabled: " + err.Error())
-	}
+	// Errors are reported inside the package, where LANGFUSE_LOG_ENABLED decides
+	// whether anything is written at all.
+	langfuseClient, _ := langfuse.NewClientFromEnv()
 	if langfuseClient != nil {
 		langfuseClient.Start()
 		defer langfuseClient.Stop()
 	}
-	langfuseConsumer, err := langfuse.NewConsumerFromEnv()
-	if err != nil {
-		common.SysError("langfuse nsq consumer disabled: " + err.Error())
-	}
+	langfuseConsumer, _ := langfuse.NewConsumerFromEnv()
 	if langfuseConsumer != nil {
-		if err := langfuseConsumer.Start(); err != nil {
-			common.SysError("failed to start langfuse nsq consumer: " + err.Error())
-		}
+		langfuseConsumer.Start()
 		defer langfuseConsumer.Stop()
 	}
 

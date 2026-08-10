@@ -318,6 +318,7 @@ func NewConsumerFromEnv() (*Consumer, error) {
 	}
 	consumer, err := NewConsumer(config)
 	if err != nil {
+		logError("langfuse nsq consumer disabled: " + err.Error())
 		return nil, err
 	}
 	if consumer == nil {
@@ -338,12 +339,11 @@ func splitAddresses(value string) []string {
 	return addresses
 }
 
-func (c *Consumer) Start() error {
+func (c *Consumer) Start() {
 	if c == nil {
-		return nil
+		return
 	}
 	go c.run()
-	return nil
 }
 
 // run connects before consuming, retrying in the background rather than

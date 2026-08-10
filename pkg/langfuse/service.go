@@ -184,6 +184,7 @@ func NewClientFromEnv() (*Client, error) {
 	}
 	client, err := NewClient(config)
 	if err != nil {
+		logError("langfuse tracing disabled: " + err.Error())
 		return nil, err
 	}
 	if client == nil {
