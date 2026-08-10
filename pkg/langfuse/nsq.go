@@ -45,6 +45,11 @@ const (
 	nsqPublishRetryMax  = 1500 * time.Millisecond
 
 	nsqConsumerConnectRetry = 30 * time.Second
+
+	// One worker means strictly serial delivery. Throughput is workers divided
+	// by the Langfuse round trip, so MaxInFlight cannot raise it: nsqcc hands
+	// messages over one at a time and every delivery blocks on HTTP.
+	defaultNSQWorkers = 1
 )
 
 // nsqSink publishes one message per trace event. Grouping events into ingestion
@@ -242,7 +247,9 @@ type Consumer struct {
 	ingester *ingester
 
 	minInterval time.Duration
+	paceMu      sync.Mutex
 	nextAt      time.Time
+	workers     int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -277,11 +284,16 @@ func NewConsumer(config ConsumerConfig) (*Consumer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create nsq reader: %w", err)
 	}
+	workers := config.Workers
+	if workers <= 0 {
+		workers = defaultNSQWorkers
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Consumer{
 		reader:      reader,
 		ingester:    newIngester(config.Endpoint, config.PublicKey, config.SecretKey),
 		minInterval: config.MinInterval,
+		workers:     workers,
 		ctx:         ctx,
 		cancel:      cancel,
 		done:        make(chan struct{}),
@@ -301,6 +313,7 @@ func NewConsumerFromEnv() (*Consumer, error) {
 		MaxInFlight:     common.GetEnvOrDefault("LANGFUSE_NSQ_MAX_IN_FLIGHT", defaultNSQMaxInFlight),
 		MinInterval:     time.Duration(common.GetEnvOrDefault("LANGFUSE_NSQ_MIN_INTERVAL_MS", 0)) * time.Millisecond,
 		MaxAttempts:     uint16(common.GetEnvOrDefault("LANGFUSE_NSQ_MAX_ATTEMPTS", defaultNSQMaxAttempts)),
+		Workers:         common.GetEnvOrDefault("LANGFUSE_NSQ_WORKERS", defaultNSQWorkers),
 	}
 	consumer, err := NewConsumer(config)
 	if err != nil {
@@ -309,8 +322,8 @@ func NewConsumerFromEnv() (*Consumer, error) {
 	if consumer == nil {
 		return nil, nil
 	}
-	common.SysLog(fmt.Sprintf("langfuse nsq consumer enabled: topic=%s channel=%s nsqd=%v lookupd=%v max_in_flight=%d min_interval=%s",
-		config.Topic, config.Channel, config.NSQDAddresses, config.LookupAddresses, config.MaxInFlight, config.MinInterval))
+	common.SysLog(fmt.Sprintf("langfuse nsq consumer enabled: topic=%s channel=%s nsqd=%v lookupd=%v workers=%d max_in_flight=%d min_interval=%s",
+		config.Topic, config.Channel, config.NSQDAddresses, config.LookupAddresses, consumer.workers, config.MaxInFlight, config.MinInterval))
 	return consumer, nil
 }
 
@@ -341,7 +354,7 @@ func (c *Consumer) run() {
 	for {
 		err := c.reader.Connect(c.ctx)
 		if err == nil {
-			c.consume()
+			c.consumeAll()
 			return
 		}
 		if c.ctx.Err() != nil {
@@ -370,6 +383,22 @@ func (c *Consumer) Stop() {
 		case <-time.After(shutdownTimeout):
 		}
 	})
+}
+
+// consumeAll runs the read/deliver/ack loop on several goroutines. Every step
+// between nsqd and Langfuse is serial otherwise — go-nsq registers one handler,
+// nsqcc hands messages over an unbuffered channel, and each delivery blocks on
+// an HTTP round trip — so this is the only place that changes drain rate.
+func (c *Consumer) consumeAll() {
+	var workers sync.WaitGroup
+	for i := 0; i < c.workers; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			c.consume()
+		}()
+	}
+	workers.Wait()
 }
 
 func (c *Consumer) consume() {
@@ -407,19 +436,27 @@ func (c *Consumer) deliverMessage(message *nsq.Message) error {
 }
 
 // pace holds delivery until the configured interval since the previous message
-// has elapsed. The consume loop is single-goroutine, so no locking is needed.
+// has elapsed, which is what bounds the load Langfuse sees.
 func (c *Consumer) pace() {
 	if c.minInterval <= 0 {
 		return
 	}
-	if wait := time.Until(c.nextAt); wait > 0 {
-		if wait > c.minInterval {
-			wait = c.minInterval
-		}
+	// Each worker reserves its slot under the lock before waiting, so the
+	// interval bounds the combined rate rather than each worker's own rate.
+	// Reading nextAt and writing it back afterwards would let every worker see
+	// the same deadline and fire together.
+	c.paceMu.Lock()
+	slot := c.nextAt
+	if now := time.Now(); slot.Before(now) {
+		slot = now
+	}
+	c.nextAt = slot.Add(c.minInterval)
+	c.paceMu.Unlock()
+
+	if wait := time.Until(slot); wait > 0 {
 		select {
 		case <-time.After(wait):
 		case <-c.ctx.Done():
 		}
 	}
-	c.nextAt = time.Now().Add(c.minInterval)
 }

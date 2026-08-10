@@ -54,6 +54,10 @@ type ConsumerConfig struct {
 	// default of 1 makes delivery strictly serial: one event finishes before
 	// the next starts.
 	MaxInFlight int
+	// Workers is how many deliveries run at once. MaxInFlight only widens NSQ's
+	// prefetch window; it cannot raise throughput, because nsqcc hands messages
+	// over one at a time and each delivery blocks on an HTTP round trip.
+	Workers int
 	// MinInterval paces delivery further by holding each message until the
 	// interval since the previous one has elapsed. Zero disables pacing.
 	MinInterval time.Duration
