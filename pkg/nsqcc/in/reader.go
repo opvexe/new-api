@@ -14,9 +14,14 @@ import (
 )
 
 type nsqReader struct {
-	consumer         *nsq.Consumer
-	cMut             sync.Mutex
-	unAckMsgs        []*nsq.Message
+	consumer *nsq.Consumer
+	cMut     sync.Mutex
+	// unAckMsgs exists so a shutdown can requeue what was handed out but never
+	// acknowledged. It is keyed by message ID rather than appended to, because a
+	// slice that is only ever appended to pins every message body for the life
+	// of the process: at production rates that leaks gigabytes an hour.
+	unAckMut         sync.Mutex
+	unAckMsgs        map[nsq.MessageID]*nsq.Message
 	internalMessages chan *nsq.Message
 	interruptChan    chan struct{}
 	interruptOnce    sync.Once
@@ -27,6 +32,7 @@ type nsqReader struct {
 func NewNSQReader(conf Config, mgr ifs.FS) (nsqcc.Async, error) {
 	n := &nsqReader{
 		conf:             conf,
+		unAckMsgs:        make(map[nsq.MessageID]*nsq.Message),
 		internalMessages: make(chan *nsq.Message),
 		interruptChan:    make(chan struct{}),
 	}
@@ -95,9 +101,14 @@ func (n *nsqReader) ReadBatch(ctx context.Context) (*nsq.Message, nsqcc.AsyncAck
 	if err != nil {
 		return nil, nil, err
 	}
-	n.unAckMsgs = append(n.unAckMsgs, msg)
+	n.unAckMut.Lock()
+	n.unAckMsgs[msg.ID] = msg
+	n.unAckMut.Unlock()
 
 	return msg, func(rctx context.Context, res error) error {
+		n.unAckMut.Lock()
+		delete(n.unAckMsgs, msg.ID)
+		n.unAckMut.Unlock()
 		if res != nil {
 			msg.Requeue(-1)
 		}
@@ -113,11 +124,13 @@ func (n *nsqReader) read(ctx context.Context) (*nsq.Message, error) {
 		return msg, nil
 	case <-ctx.Done():
 	case <-n.interruptChan:
+		n.unAckMut.Lock()
 		for _, m := range n.unAckMsgs {
 			m.Requeue(-1)
 			m.Finish()
 		}
-		n.unAckMsgs = nil
+		n.unAckMsgs = make(map[nsq.MessageID]*nsq.Message)
+		n.unAckMut.Unlock()
 		_ = n.disconnect()
 		return nil, nsqcc.ErrTypeClosed
 	}
