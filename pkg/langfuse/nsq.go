@@ -95,7 +95,7 @@ func newNSQSink(address string, topic string) (*nsqSink, error) {
 	// new-api from starting, so a failure here only warns and the sink retries
 	// on its next publish.
 	if err := sink.connect(); err != nil {
-		common.SysError(fmt.Sprintf("langfuse nsqd %s is not reachable yet, will retry: %s", address, err.Error()))
+		logError(fmt.Sprintf("langfuse nsqd %s is not reachable yet, will retry: %s", address, err.Error()))
 	}
 	return sink, nil
 }
@@ -221,7 +221,7 @@ func (s *nsqSink) reconnect() error {
 		// log so an outage cannot flood it.
 		if time.Since(s.lastReportErr) > nsqReconnectReportPeriod {
 			s.lastReportErr = time.Now()
-			common.SysError("failed to reconnect langfuse nsq producer: " + err.Error())
+			logError("failed to reconnect langfuse nsq producer: " + err.Error())
 		}
 		return fmt.Errorf("reconnect nsq producer: %w", err)
 	}
@@ -301,6 +301,7 @@ func NewConsumer(config ConsumerConfig) (*Consumer, error) {
 }
 
 func NewConsumerFromEnv() (*Consumer, error) {
+	logEnabled = common.GetEnvOrDefaultBool("LANGFUSE_LOG_ENABLED", false)
 	config := ConsumerConfig{
 		Enabled:         common.GetEnvOrDefaultBool("LANGFUSE_NSQ_CONSUMER_ENABLED", false),
 		Endpoint:        common.GetEnvOrDefaultString("LANGFUSE_ENDPOINT", "https://cloud.langfuse.com"),
@@ -322,7 +323,7 @@ func NewConsumerFromEnv() (*Consumer, error) {
 	if consumer == nil {
 		return nil, nil
 	}
-	common.SysLog(fmt.Sprintf("langfuse nsq consumer enabled: topic=%s channel=%s nsqd=%v lookupd=%v workers=%d max_in_flight=%d min_interval=%s",
+	logInfo(fmt.Sprintf("langfuse nsq consumer enabled: topic=%s channel=%s nsqd=%v lookupd=%v workers=%d max_in_flight=%d min_interval=%s",
 		config.Topic, config.Channel, config.NSQDAddresses, config.LookupAddresses, consumer.workers, config.MaxInFlight, config.MinInterval))
 	return consumer, nil
 }
@@ -360,7 +361,7 @@ func (c *Consumer) run() {
 		if c.ctx.Err() != nil {
 			return
 		}
-		common.SysError("langfuse nsq consumer cannot reach nsqd, will retry: " + err.Error())
+		logError("langfuse nsq consumer cannot reach nsqd, will retry: " + err.Error())
 		select {
 		case <-time.After(nsqConsumerConnectRetry):
 		case <-c.ctx.Done():
@@ -376,7 +377,7 @@ func (c *Consumer) Stop() {
 	c.stop.Do(func() {
 		c.cancel()
 		if err := c.reader.Close(context.Background()); err != nil {
-			common.SysError("failed to close langfuse nsq reader: " + err.Error())
+			logError("failed to close langfuse nsq reader: " + err.Error())
 		}
 		select {
 		case <-c.done:
@@ -415,7 +416,7 @@ func (c *Consumer) consume() {
 		// A non-nil ack error requeues the message with NSQ's backoff, which is
 		// what keeps events alive across a Langfuse outage.
 		if ackErr := ack(c.ctx, c.deliverMessage(message)); ackErr != nil {
-			common.SysError("failed to acknowledge langfuse nsq message: " + ackErr.Error())
+			logError("failed to acknowledge langfuse nsq message: " + ackErr.Error())
 		}
 	}
 }
@@ -428,7 +429,7 @@ func (c *Consumer) deliverMessage(message *nsq.Message) error {
 	if err := common.Unmarshal(message.Body, &item); err != nil {
 		// A malformed message will never become valid; requeuing it would block
 		// the channel behind it forever, so drop it and keep the pipeline moving.
-		common.SysError("langfuse consumer discarding unparseable message: " + err.Error())
+		logError("langfuse consumer discarding unparseable message: " + err.Error())
 		return nil
 	}
 	c.pace()
