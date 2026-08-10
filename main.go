@@ -196,8 +196,7 @@ func main() {
 	InjectGoogleAnalytics()
 	langfuseClient, err := langfuse.NewClientFromEnv()
 	if err != nil {
-		common.FatalLog("failed to initialize langfuse: " + err.Error())
-		return
+		common.SysError("langfuse tracing disabled: " + err.Error())
 	}
 	if langfuseClient != nil {
 		langfuseClient.Start()
@@ -205,13 +204,11 @@ func main() {
 	}
 	langfuseConsumer, err := langfuse.NewConsumerFromEnv()
 	if err != nil {
-		common.FatalLog("failed to initialize langfuse nsq consumer: " + err.Error())
-		return
+		common.SysError("langfuse nsq consumer disabled: " + err.Error())
 	}
 	if langfuseConsumer != nil {
 		if err := langfuseConsumer.Start(); err != nil {
-			common.FatalLog("failed to start langfuse nsq consumer: " + err.Error())
-			return
+			common.SysError("failed to start langfuse nsq consumer: " + err.Error())
 		}
 		defer langfuseConsumer.Stop()
 	}

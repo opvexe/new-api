@@ -43,6 +43,8 @@ const (
 	nsqPublishAttempts  = 5
 	nsqPublishRetryBase = 200 * time.Millisecond
 	nsqPublishRetryMax  = 1500 * time.Millisecond
+
+	nsqConsumerConnectRetry = 30 * time.Second
 )
 
 // nsqSink publishes one message per trace event. Grouping events into ingestion
@@ -326,11 +328,32 @@ func (c *Consumer) Start() error {
 	if c == nil {
 		return nil
 	}
-	if err := c.reader.Connect(c.ctx); err != nil {
-		return fmt.Errorf("connect nsq reader: %w", err)
-	}
-	go c.consume()
+	go c.run()
 	return nil
+}
+
+// run connects before consuming, retrying in the background rather than
+// reporting the failure upward. A caller cannot tell a wrong address from a
+// host that is briefly unreachable, so surfacing the error would make an nsqd
+// restart take the API gateway down with it.
+func (c *Consumer) run() {
+	defer close(c.done)
+	for {
+		err := c.reader.Connect(c.ctx)
+		if err == nil {
+			c.consume()
+			return
+		}
+		if c.ctx.Err() != nil {
+			return
+		}
+		common.SysError("langfuse nsq consumer cannot reach nsqd, will retry: " + err.Error())
+		select {
+		case <-time.After(nsqConsumerConnectRetry):
+		case <-c.ctx.Done():
+			return
+		}
+	}
 }
 
 func (c *Consumer) Stop() {
@@ -350,7 +373,6 @@ func (c *Consumer) Stop() {
 }
 
 func (c *Consumer) consume() {
-	defer close(c.done)
 	for {
 		message, ack, err := c.reader.ReadBatch(c.ctx)
 		if err != nil {
