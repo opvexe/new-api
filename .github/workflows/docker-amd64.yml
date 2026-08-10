@@ -12,7 +12,7 @@ permissions:
 
 env:
   IMAGE_VERSION_PREFIX: v1.0.0-rc
-  SHORT_SHA: rc.24
+  SHORT_SHA: 24
 
 jobs:
   build:
